@@ -35,16 +35,24 @@ const activeUserDomains = new Map();
 // In-memory traffic counters: userId -> { session: number, delta: number }
 const trafficCounters = new Map();
 
-// userId -> Array of FastifyReply objects
 const activeSseClients = new Map();
 
-// SSE Heartbeat (every 20s) to keep proxy connections alive
 setInterval(() => {
 	for (const [userId, clients] of activeSseClients.entries()) {
+		const alive = [];
 		for (const res of clients) {
+			if (res.raw.destroyed || res.raw.writableEnded) {
+				continue;
+			}
 			try {
 				res.raw.write(': ping\n\n');
+				alive.push(res);
 			} catch (_) { }
+		}
+		if (alive.length === 0) {
+			activeSseClients.delete(userId);
+		} else if (alive.length !== clients.length) {
+			activeSseClients.set(userId, alive);
 		}
 	}
 }, 20000);
@@ -684,13 +692,17 @@ fastify.get("/api/events", async (req, reply) => {
 	reply.raw.setHeader('Connection', 'keep-alive');
 	reply.raw.setHeader('Access-Control-Allow-Origin', '*');
 
-	// Отправляем первое сообщение чтобы соединение сразу установилось
 	reply.raw.write('data: {"cmd":"connected"}\n\n');
 
 	if (!activeSseClients.has(userId)) {
 		activeSseClients.set(userId, []);
 	}
 	activeSseClients.get(userId).push(reply);
+
+	let resolveConn;
+	const connPromise = new Promise((resolve) => {
+		resolveConn = resolve;
+	});
 
 	req.raw.on('close', () => {
 		const clients = activeSseClients.get(userId);
@@ -699,10 +711,10 @@ fastify.get("/api/events", async (req, reply) => {
 			if (idx !== -1) clients.splice(idx, 1);
 			if (clients.length === 0) activeSseClients.delete(userId);
 		}
+		if (resolveConn) resolveConn();
 	});
 
-	// Держим соединение открытым
-	await new Promise(() => { });
+	await connPromise;
 });
 
 fastify.post("/api/admin/command", async (req, reply) => {
@@ -1384,14 +1396,8 @@ fastify.get("/api/browser/download/:filename", async (req, reply) => {
 	return reply.send(createReadStream(filePath));
 });
 
-// ----------------------------------------------------
-// МАСКИРОВКА НЕИЗВЕСТНЫХ МАРШРУТОВ (DROP CONNECTION)
-// ----------------------------------------------------
-fastify.setNotFoundHandler(async (req, reply) => {
-	// Бесконечное ожидание (Tarpit)
-	// Не отправляем ответ и не закрываем сокет.
-	// Запрос просто повиснет в воздухе.
-	await new Promise(() => { });
+fastify.setNotFoundHandler((req, reply) => {
+	req.raw.destroy();
 });
 
 fastify.server.on("listening", () => {
