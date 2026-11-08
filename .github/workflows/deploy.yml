@@ -54,25 +54,13 @@ jobs:
             fi
             cd ~/Wispr
 
-            if [ -f ~/Wispr/backend/.env ] && [ ! -f ~/Wispr/.env ]; then
-              cp ~/Wispr/backend/.env ~/Wispr/.env
-            fi
-
             git fetch origin main
             git reset --hard origin/main
-            git clean -fd -e .env -e backend/.env -e releases/
+            git clean -fd -e .env -e releases/
 
             git sparse-checkout init --cone
-            git sparse-checkout set backend telegram_bot docker-compose.yml Dockerfile database.sql .dockerignore .env.example
+            git sparse-checkout set backend telegram_bot docker-compose.yml Dockerfile database.sql .dockerignore
             git sparse-checkout reapply
-
-            if [ ! -f ~/Wispr/.env ]; then
-              if [ -f ~/Wispr/backend/.env ]; then
-                cp ~/Wispr/backend/.env ~/Wispr/.env
-              elif [ -f ~/Wispr/.env.example ]; then
-                cp ~/Wispr/.env.example ~/Wispr/.env
-              fi
-            fi
 
             docker compose up -d --build
             docker image prune -f
