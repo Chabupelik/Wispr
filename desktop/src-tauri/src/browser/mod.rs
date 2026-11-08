@@ -4,10 +4,8 @@ use std::sync::Arc;
 use tauri::{Emitter, Manager, WebviewBuilder, WebviewUrl};
 use url::Url;
 
-/// Менеджер нативных Chromium-вкладок (Multi-Webview)
 #[derive(Clone, Default)]
 pub struct TabManager {
-    // Хранилище созданных вкладок: tab_id -> webview label
     tabs: Arc<Mutex<HashMap<String, String>>>,
     active_tab_id: Arc<Mutex<Option<String>>>,
     top_bar_height: Arc<Mutex<f64>>,
@@ -18,7 +16,7 @@ impl TabManager {
         Self {
             tabs: Arc::new(Mutex::new(HashMap::new())),
             active_tab_id: Arc::new(Mutex::new(None)),
-            top_bar_height: Arc::new(Mutex::new(84.0)), // Значение по умолчанию
+            top_bar_height: Arc::new(Mutex::new(84.0)),
         }
     }
 
@@ -32,7 +30,6 @@ impl TabManager {
         let scale_factor = window.scale_factor().unwrap_or(1.0);
 
         let (win_w, win_h) = if is_fs {
-            // В полноэкранном режиме используем габариты монитора, чтобы устранить зазор от панели задач
             if let Ok(Some(monitor)) = window.current_monitor() {
                 let mon_logical = monitor.size().to_logical::<f64>(scale_factor);
                 (mon_logical.width, mon_logical.height)
@@ -64,14 +61,13 @@ impl TabManager {
         self.sync_main_window_geometry(window);
     }
 
-    /// Создает новую нативную вкладку Chromium под панелью управления или переходит по URL
     pub fn create_or_navigate_tab(&self, window: &tauri::Window, tab_id: &str, target_url: &str) -> Result<(), String> {
         let label = format!("tab-wv-{}", tab_id);
-        println!("[TAB_MANAGER] create_or_navigate_tab: tab_id={}, target_url={}, label={}", tab_id, target_url, label);
+        log::debug!("[TAB_MANAGER] create_or_navigate_tab: tab_id={}, target_url={}, label={}", tab_id, target_url, label);
         
         let is_blank = target_url.is_empty() || target_url == "about:blank";
         if is_blank {
-            println!("[TAB_MANAGER] Blank URL -> hiding all webviews");
+            log::debug!("[TAB_MANAGER] Blank URL -> hiding all webviews");
             self.hide_all_webviews(window);
             let mut active = self.active_tab_id.lock();
             *active = Some(tab_id.to_string());
@@ -87,19 +83,17 @@ impl TabManager {
 
         let app_handle = window.app_handle();
 
-        // 1. Если вкладка уже создана — выполняем навигацию и переключаем
         if let Some(existing_wv) = app_handle.get_webview(&label) {
-            println!("[TAB_MANAGER] Found existing webview for {}. Navigating to {:?}", label, parsed_url);
+            log::debug!("[TAB_MANAGER] Found existing webview for {}. Navigating to {:?}", label, parsed_url);
             if let WebviewUrl::External(u) = &parsed_url {
                 if let Err(e) = existing_wv.navigate(u.clone()) {
-                    println!("[TAB_MANAGER] ERROR navigating webview: {:?}", e);
+                    log::error!("[TAB_MANAGER] ERROR navigating webview: {:?}", e);
                 }
             }
             self.switch_to_tab(window, tab_id)?;
             return Ok(());
         }
 
-        // 2. Рассчитываем геометрию (строго под панелью 84px)
         let window_size = window
             .inner_size()
             .map_err(|e| format!("Failed to get window size: {}", e))?;
@@ -115,7 +109,6 @@ impl TabManager {
         let base_script = r#"
                 if (window !== window.top) return;
 
-                // Спуфинг объекта Client Hints
                 if (navigator.userAgentData) {
                   Object.defineProperty(navigator, 'userAgentData', {
                     get: () => ({
@@ -138,7 +131,6 @@ impl TabManager {
                   });
                 }
 
-                // Track title changes reliably across all origins
                 const notifyTitle = () => {
                     if (!document.title) return;
                     const title = document.title;
@@ -220,7 +212,6 @@ impl TabManager {
                 window.addEventListener('DOMContentLoaded', notifyTitle);
                 window.addEventListener('load', notifyTitle);
 
-                // Track URL changes for SPAs
                 const notifyUrl = (url) => {
                     try {
                         if (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) {
@@ -249,7 +240,6 @@ impl TabManager {
                     notifyUrl(window.location.href);
                 };
 
-                // Вспомогательная функция для гарантированной отправки действий в Rust из удаленного WebView
                 const _callTauriAction = (action) => {
                     try {
                         window.open('tauri-action://' + action, '_blank');
@@ -263,7 +253,6 @@ impl TabManager {
                     }
                 };
 
-                // Полноэкранный режим (F11 / Esc) в дочерних Webview
                 window.addEventListener('keydown', (e) => {
                     if (e.key === 'F11') {
                         e.preventDefault();
@@ -276,7 +265,6 @@ impl TabManager {
                     }
                 }, true);
 
-                // Определение подведения курсора к верхнему краю экрана в полноэкранном режиме
                 let _lastTopEdgeCheck = 0;
                 window.addEventListener('mousemove', (e) => {
                     if (e.clientY <= 3) {
@@ -288,7 +276,6 @@ impl TabManager {
                     }
                 }, { passive: true });
 
-                // Поддержка HTML5 Fullscreen (YouTube, игры и т.д.)
                 document.addEventListener('fullscreenchange', () => {
                     const isElemFs = !!document.fullscreenElement;
                     _callTauriAction(isElemFs ? 'enter-fullscreen' : 'exit-fullscreen');
@@ -303,7 +290,7 @@ impl TabManager {
             .incognito(true)
             .initialization_script(&init_script)
             .on_new_window(move |url, _features| {
-                println!("[NEW_WINDOW] Requested URL: {}", url);
+                log::debug!("[NEW_WINDOW] Requested URL: {}", url);
                 if url.scheme() == "tauri-action" {
                     let mut action = url.host_str().unwrap_or("");
                     if action.is_empty() {
@@ -364,7 +351,6 @@ impl TabManager {
                 true
             })
             .on_page_load(move |webview, _payload| {
-                // Автоматическая перезагрузка при первом открытии вкладки в сессии (решает проблему белого экрана ChatGPT/YouTube)
                 let _ = webview.eval(r#"
                     if (!sessionStorage.getItem('first_load_done')) {
                         sessionStorage.setItem('first_load_done', 'true');
@@ -384,7 +370,6 @@ impl TabManager {
                         url: url.to_string(),
                     });
 
-                    // Trigger title evaluation on load
                     let script = format!(r#"
                         (function() {{
                             const t = document.title;
@@ -403,18 +388,15 @@ impl TabManager {
             .on_download(move |webview, event| {
                 match event {
                     tauri::webview::DownloadEvent::Requested { url, destination } => {
-                        println!("[DOWNLOAD] Requested: {:?}", url);
+                        log::debug!("[DOWNLOAD] Requested: {:?}", url);
 
-                        // Определяем имя файла из URL
                         let file_name = url.path_segments()
                             .and_then(|mut s| s.next_back())
                             .filter(|s| !s.is_empty())
                             .unwrap_or("download")
                             .to_string();
-                        // Убираем query-параметры из имени файла
                         let file_name = file_name.split('?').next().unwrap_or(&file_name).to_string();
 
-                        // Устанавливаем путь в папку Downloads пользователя
                         let dl_dir = if let Ok(profile) = std::env::var("USERPROFILE") {
                             std::path::PathBuf::from(profile).join("Downloads")
                         } else {
@@ -422,7 +404,7 @@ impl TabManager {
                         };
                         *destination = dl_dir.join(&file_name);
 
-                        println!("[DOWNLOAD] Saving to: {:?}", destination);
+                        log::debug!("[DOWNLOAD] Saving to: {:?}", destination);
 
                         #[derive(serde::Serialize, Clone)]
                         #[allow(non_snake_case)]
@@ -440,7 +422,7 @@ impl TabManager {
                         true
                     }
                     tauri::webview::DownloadEvent::Finished { url: _, path, success } => {
-                        println!("[DOWNLOAD] Finished: success={}, path={:?}", success, path);
+                        log::debug!("[DOWNLOAD] Finished: success={}, path={:?}", success, path);
                         #[derive(serde::Serialize, Clone)]
                         #[allow(non_snake_case)]
                         struct DlFinishedPayload {
@@ -465,7 +447,7 @@ impl TabManager {
                 tauri::LogicalSize::new(logical_size.width, content_height),
             )
             .map_err(|e| {
-                println!("[TAB_MANAGER] ERROR adding child Webview: {:?}", e);
+                log::error!("[TAB_MANAGER] ERROR adding child Webview: {:?}", e);
                 format!("Failed to add child Webview: {}", e)
             })?;
 
@@ -479,32 +461,27 @@ impl TabManager {
         Ok(())
     }
 
-    /// Скрывает все дочерние webview
     pub fn hide_all_webviews(&self, window: &tauri::Window) {
         let app_handle = window.app_handle();
         let tabs_map = self.tabs.lock();
         for (_, label) in tabs_map.iter() {
             if let Some(wv) = app_handle.get_webview(label) {
-                // Use offscreen positioning instead of hide() to prevent repainting flash
                 let _ = wv.set_position(tauri::LogicalPosition::new(-10000.0, -10000.0));
             }
         }
     }
 
-    /// Переключает видимость между нативными вкладками
     pub fn switch_to_tab(&self, window: &tauri::Window, tab_id: &str) -> Result<(), String> {
-        println!("[TAB_MANAGER] switch_to_tab: {}", tab_id);
+        log::debug!("[TAB_MANAGER] switch_to_tab: {}", tab_id);
         let app_handle = window.app_handle();
 
         let (win_w, top_bar_height, content_height) = self.get_target_geometry(window);
-
         let tabs_map = self.tabs.lock();
         let mut found_active = false;
-        // Сначала показываем целевую вкладку, чтобы избежать мерцания
         for (id, label) in tabs_map.iter() {
             if id == tab_id {
                 if let Some(wv) = app_handle.get_webview(label) {
-                    println!("[TAB_MANAGER] Showing webview: {}", label);
+                    log::debug!("[TAB_MANAGER] Showing webview: {}", label);
                     let _ = wv.set_position(tauri::LogicalPosition::new(0.0, top_bar_height));
                     let _ = wv.set_size(tauri::LogicalSize::new(win_w, content_height));
                     let _ = wv.show();
@@ -514,7 +491,6 @@ impl TabManager {
             }
         }
         
-        // Затем убираем остальные вкладки за экран (offscreen) вместо hide()
         for (id, label) in tabs_map.iter() {
             if id != tab_id {
                 if let Some(wv) = app_handle.get_webview(label) {
@@ -524,7 +500,7 @@ impl TabManager {
         }
 
         if !found_active {
-            println!("[TAB_MANAGER] No webview found for tab_id: {}. Moving all offscreen.", tab_id);
+            log::debug!("[TAB_MANAGER] No webview found for tab_id: {}. Moving all offscreen.", tab_id);
             for (_, label) in tabs_map.iter() {
                 if let Some(wv) = app_handle.get_webview(label) {
                     let _ = wv.set_position(tauri::LogicalPosition::new(-10000.0, -10000.0));
@@ -543,7 +519,6 @@ impl TabManager {
         Ok(())
     }
 
-    /// Закрывает нативную вкладку и уничтожает ее Webview
     pub fn close_tab(&self, window: &tauri::Window, tab_id: &str) -> Result<(), String> {
         let app_handle = window.app_handle();
         let label = {
@@ -551,18 +526,18 @@ impl TabManager {
             tabs_map.remove(tab_id)
         };
 
-        println!("[TAB_MANAGER] Closing tab_id: {} -> label: {:?}", tab_id, label);
+        log::debug!("[TAB_MANAGER] Closing tab_id: {} -> label: {:?}", tab_id, label);
 
         if let Some(lbl) = label {
             if let Some(wv) = app_handle.get_webview(&lbl) {
-                println!("[TAB_MANAGER] Found webview for label: {}. Destroying...", lbl);
+                log::debug!("[TAB_MANAGER] Found webview for label: {}. Destroying...", lbl);
                 let _ = wv.hide();
                 let _ = wv.close().map_err(|e| {
-                    println!("[TAB_MANAGER] Error closing webview: {}", e);
+                    log::error!("[TAB_MANAGER] Error closing webview: {}", e);
                     e.to_string()
                 });
             } else {
-                println!("[TAB_MANAGER] Webview for label {} not found in app_handle!", lbl);
+                log::warn!("[TAB_MANAGER] Webview for label {} not found in app_handle!", lbl);
             }
         }
 
@@ -574,7 +549,6 @@ impl TabManager {
         Ok(())
     }
 
-    /// Устанавливает масштаб веб-страницы для конкретной вкладки
     pub fn set_zoom(&self, window: &tauri::Window, tab_id: &str, zoom_factor: f64) -> Result<(), String> {
         let app_handle = window.app_handle();
         let tabs_map = self.tabs.lock();
@@ -586,7 +560,6 @@ impl TabManager {
         Ok(())
     }
 
-    /// Закрывает все вкладки (при смене пользователя / выходе)
     pub fn close_all_tabs(&self, window: &tauri::Window) -> Result<(), String> {
         let app_handle = window.app_handle();
         let labels: Vec<String> = {
@@ -609,7 +582,6 @@ impl TabManager {
         Ok(())
     }
 
-    /// Синхронизирует размер и координаты активной вкладки с главным окном при перемещении/ресайзе
     pub fn sync_main_window_geometry(&self, window: &tauri::Window) {
         let active_id = self.active_tab_id.lock().clone();
         if let Some(id) = active_id {
@@ -628,7 +600,6 @@ impl TabManager {
         }
     }
 
-    /// Синхронизирует видимость активной вкладки при сворачивании/потере фокуса главного окна
     pub fn sync_main_window_focus(&self, window: &tauri::Window, focused: bool) {
         let app_handle = window.app_handle();
         let active_id = self.active_tab_id.lock().clone();
@@ -647,7 +618,6 @@ impl TabManager {
         }
     }
 
-    /// Навигация «Назад»
     pub fn go_back(&self, window: &tauri::Window, tab_id: &str) -> Result<(), String> {
         let app_handle = window.app_handle();
         let tabs_map = self.tabs.lock();
@@ -659,7 +629,6 @@ impl TabManager {
         Ok(())
     }
 
-    /// Навигация «Вперед»
     pub fn go_forward(&self, window: &tauri::Window, tab_id: &str) -> Result<(), String> {
         let app_handle = window.app_handle();
         let tabs_map = self.tabs.lock();
@@ -671,7 +640,6 @@ impl TabManager {
         Ok(())
     }
 
-    /// Перезагрузка страницы
     pub fn reload(&self, window: &tauri::Window, tab_id: &str) -> Result<(), String> {
         let app_handle = window.app_handle();
         let tabs_map = self.tabs.lock();

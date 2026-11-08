@@ -1,18 +1,13 @@
-// frontend/src-tauri/src/commands.rs
 use crate::browser::TabManager;
 use crate::security::device::get_hardware_fingerprint;
 use crate::tunnel::{ProxyConnectionInfo, TunnelManager};
 use tauri::{Emitter, Manager, State};
 
-/// Возвращает уникальный аппаратный отпечаток устройства
 #[tauri::command]
 pub fn get_device_id() -> String {
     get_hardware_fingerprint()
 }
 
-/// Запускает Wisp-туннель к VPS и поднимает локальный прокси.
-/// Перед переключением в Tunnel-режим чистит весь кэш WebView2,
-/// чтобы исключить утечку данных из FakeChromeView (кэшированные страницы с реальным IP).
 #[tauri::command]
 pub async fn start_tunnel(
     app: tauri::AppHandle,
@@ -20,19 +15,11 @@ pub async fn start_tunnel(
     token: String,
     manager: State<'_, TunnelManager>,
 ) -> Result<ProxyConnectionInfo, String> {
-    // Чистим ВСЕ данные браузера (cookies, cache, localStorage) ПЕРЕД подключением к WISP.
-    // Это критически важно: без этого WebView2 может отдать кэшированную страницу
-    // с реальным IP из сессии FakeChromeView.
     for (_label, wv) in app.webviews() {
         let _ = wv.clear_all_browsing_data();
     }
 
-    // Принудительно удаляем HTTP disk-cache WebView2 на диске.
-    // clear_all_browsing_data() работает только для in-memory кэша активных webview,
-    // но HTTP-кэш на диске может пережить смену сессии.
-    // Без этого 2ip.ru и подобные сервисы отдают закэшированный ответ с реальным IP.
     if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-        // Старые пути от прежних версий (до перенаправления папки данных в %TEMP%)
         let cache_path = std::path::Path::new(&local_app_data).join("EBWebView");
         if cache_path.exists() {
             let _ = std::fs::remove_dir_all(&cache_path);
@@ -44,9 +31,6 @@ pub async fn start_tunnel(
             log::info!("[TUNNEL] com.google.chrome profile removed: {:?}", chrome_path);
         }
     }
-    // Текущая папка данных WebView2 — %TEMP%\ShellCache.
-    // Пока WebView2 запущен, часть файлов заблокирована, поэтому best-effort:
-    // незаблокированные файлы кэша удалятся, остальные чистит clear_all_browsing_data.
     let shell_cache = std::env::temp_dir().join("ShellCache");
     if shell_cache.exists() {
         let _ = std::fs::remove_dir_all(&shell_cache);
@@ -57,7 +41,6 @@ pub async fn start_tunnel(
     manager.start(&wisp_url, &token).await
 }
 
-/// Останавливает активный прокси-туннель
 #[tauri::command]
 pub fn stop_tunnel(manager: State<'_, TunnelManager>) -> Result<(), String> {
     manager.stop();
@@ -68,10 +51,6 @@ pub fn stop_tunnel(manager: State<'_, TunnelManager>) -> Result<(), String> {
 
 
 
-
-// ----------------------------------------------------
-// НАЦИОНАЛЬНЫЕ КОМАНДЫ ДЛЯ CHROMIUM-ВКЛАДОК (MULTI-WEBVIEW)
-// ----------------------------------------------------
 
 #[tauri::command]
 pub async fn native_navigate_tab(
@@ -297,12 +276,12 @@ pub fn native_toggle_fullscreen(app: tauri::AppHandle) -> Result<bool, String> {
                         unsafe {
                             SetWindowPos(
                                 hwnd.0 as isize,
-                                0, // HWND_TOP
+                                0,
                                 pos.x,
                                 pos.y,
                                 size.width as i32,
                                 size.height as i32,
-                                0x0004 | 0x0020 | 0x0040, // SWP_NOZORDER | SWP_FRAMECHANGED | SWP_SHOWWINDOW
+                                0x0004 | 0x0020 | 0x0040,
                             );
                         }
                     }
@@ -473,16 +452,11 @@ pub fn native_exit_fullscreen_if_active(app: tauri::AppHandle) -> Result<bool, S
     }
 }
 
-/// Самоуничтожение приложения: запускает независимый процесс (PowerShell, detached),
-/// который после выхода браузера затирает его .exe нулями и удаляет файл,
-/// а также зачищает временную папку данных WebView2 в %TEMP%.
 #[tauri::command]
 pub fn self_destruct() {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        // CREATE_NO_WINDOW — без консольного окна (DETACHED_PROCESS ломает запуск PowerShell);
-        // NEW_PROCESS_GROUP + BREAKAWAY_FROM_JOB — процесс независим от родителя
         const CHILD_FLAGS: u32 = 0x0800_0000 | 0x0000_0200 | 0x0100_0000;
 
         let pid = std::process::id();
@@ -491,14 +465,12 @@ pub fn self_destruct() {
             .unwrap_or_default();
 
         if exe.is_empty() {
-            println!("ERROR: current_exe() failed");
+            log::error!("current_exe() failed");
         } else {
-            // Абсолютный путь к powershell — не зависим от PATH
             let sysroot = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
             let ps_exe = std::path::Path::new(&sysroot)
                 .join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
 
-            // Скрипт ожидает завершения процесса и перезаписывает файл нулями
             let script = format!(
                 r#"$deadline=(Get-Date).AddSeconds(30)
 while((Get-Process -Id {pid} -ErrorAction SilentlyContinue) -and ((Get-Date) -lt $deadline)){{ Start-Sleep -Milliseconds 200 }}
@@ -533,8 +505,8 @@ Remove-Item -LiteralPath (Join-Path $env:TEMP 'ShellCache') -Recurse -Force -Err
                 .creation_flags(CHILD_FLAGS)
                 .spawn()
             {
-                Ok(_) => println!("SPAWNED pid={pid} exe={exe}"),
-                Err(e) => println!("SPAWN_ERR: {} (ps={:?})", e, ps_exe),
+                Ok(_) => log::debug!("SPAWNED pid={pid} exe={exe}"),
+                Err(e) => log::error!("SPAWN_ERR: {} (ps={:?})", e, ps_exe),
             }
         }
     }
@@ -542,7 +514,6 @@ Remove-Item -LiteralPath (Join-Path $env:TEMP 'ShellCache') -Recurse -Force -Err
     std::process::exit(0);
 }
 
-/// Кодирует скрипт в base64 (UTF-16LE) для powershell -EncodedCommand
 #[cfg(windows)]
 fn powershell_encoded(script: &str) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -612,9 +583,8 @@ pub fn native_favicon_changed(app: tauri::AppHandle, tab_id: String, favicon: St
 
 #[tauri::command]
 pub fn native_context_menu(_app: tauri::AppHandle, window: String, href: String, src: String, selection: String) {
-    println!("Context menu: window={}, href={}, src={}, selection={}", window, href, src, selection);
+    log::debug!("Context menu: window={}, href={}, src={}, selection={}", window, href, src, selection);
 }
-
 
 #[tauri::command]
 pub fn native_url_changed(app: tauri::AppHandle, tab_id: String, url: String) {
@@ -625,7 +595,6 @@ pub fn native_url_changed(app: tauri::AppHandle, tab_id: String, url: String) {
         url: String,
     }
     use tauri::Emitter;
-    // Emit webview-loaded so frontend updates the URL and stops loading spinner
     let _ = app.emit("webview-loaded", UrlPayload { tabId: tab_id, url });
 }
 
@@ -689,7 +658,6 @@ pub fn native_get_downloads_dir() -> String {
     ".".to_string()
 }
 
-/// Открывает URL в новой вкладке браузера (вызывается из JS при window.open / target=_blank)
 #[tauri::command]
 pub fn native_open_new_tab(app: tauri::AppHandle, url: String) {
     #[derive(serde::Serialize, Clone)]

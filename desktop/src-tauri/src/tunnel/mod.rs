@@ -52,17 +52,13 @@ impl TunnelManager {
             format!("{}/{}", wisp_base_url, urlencoding::encode(jwt_token))
         };
 
-        log::info!("[TUNNEL] start() вызван");
-        log::info!("[TUNNEL] wisp_base_url = {}", wisp_base_url);
-        log::info!("[TUNNEL] jwt_token длина = {} символов", jwt_token.len());
-        log::info!("[TUNNEL] Итоговый WISP URL (без токена): {}/<token>", wisp_base_url);
+        log::info!("[TUNNEL] Connecting to WISP: {}", wisp_base_url);
 
-        log::info!("[TUNNEL] Вызываем WispClient::connect()...");
         let wisp_client = WispClient::connect(&formatted_url).await.map_err(|e| {
-            log::error!("[TUNNEL] WispClient::connect() ПРОВАЛИЛСЯ: {}", e);
+            log::error!("[TUNNEL] WispClient::connect() failed: {}", e);
             e
         })?;
-        log::info!("[TUNNEL] WispClient::connect() — УСПЕХ");
+        log::info!("[TUNNEL] WispClient::connect() success");
 
         let port = {
             let guard = self.proxy_server.lock();
