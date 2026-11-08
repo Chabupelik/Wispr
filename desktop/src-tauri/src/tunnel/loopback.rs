@@ -2,6 +2,7 @@ use crate::tunnel::wisp::WispClient;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch;
 use parking_lot::Mutex;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -14,6 +15,7 @@ pub struct LoopbackProxyServer {
     pub port: u16,
     pub wisp_client: Arc<Mutex<Option<WispClient>>>,
     pub mode: Arc<Mutex<ProxyMode>>,
+    shutdown_tx: watch::Sender<bool>,
 }
 
 impl LoopbackProxyServer {
@@ -41,35 +43,67 @@ impl LoopbackProxyServer {
         let mode = Arc::new(Mutex::new(ProxyMode::Transparent));
         let wisp_clone = wisp_client.clone();
         let mode_clone = mode.clone();
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
         tokio::spawn(async move {
             log::info!("[LOOPBACK PROXY] Запущен на 127.0.0.1:{}", port);
 
             loop {
-                match listener.accept().await {
-                    Ok((stream, _)) => {
-                        let w = wisp_clone.clone();
-                        let m = mode_clone.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = handle_client_connection(stream, w, m, port).await {
-                                log::debug!("[LOOPBACK] Ошибка обработки соединения: {:?}", e);
+                tokio::select! {
+                    accept_res = listener.accept() => {
+                        match accept_res {
+                            Ok((stream, _)) => {
+                                let w = wisp_clone.clone();
+                                let m = mode_clone.clone();
+                                let mut conn_shutdown = shutdown_rx.clone();
+                                tokio::spawn(async move {
+                                    tokio::select! {
+                                        res = handle_client_connection(stream, w, m, port) => {
+                                            if let Err(e) = res {
+                                                log::debug!("[LOOPBACK] Ошибка обработки соединения: {:?}", e);
+                                            }
+                                        }
+                                        _ = conn_shutdown.changed() => {
+                                            log::debug!("[LOOPBACK] Соединение закрыто по сигналу завершения");
+                                        }
+                                    }
+                                });
                             }
-                        });
+                            Err(e) => {
+                                log::error!("[LOOPBACK] Ошибка accept: {:?}", e);
+                            }
+                        }
                     }
-                    Err(e) => {
-                        log::error!("[LOOPBACK] Ошибка accept: {:?}", e);
+                    _ = shutdown_rx.changed() => {
+                        log::info!("[LOOPBACK PROXY] Завершение работы прокси-сервера");
+                        break;
                     }
                 }
             }
         });
 
-        Ok(Self { port, wisp_client, mode })
+        Ok(Self {
+            port,
+            wisp_client,
+            mode,
+            shutdown_tx,
+        })
     }
 
     pub fn set_mode(&self, new_mode: ProxyMode) {
         let mut guard = self.mode.lock();
         log::info!("[LOOPBACK PROXY] Смена режима: {:?} -> {:?}", *guard, new_mode);
         *guard = new_mode;
+    }
+
+    pub fn shutdown(&self) {
+        let _ = self.shutdown_tx.send(true);
+    }
+}
+
+impl Drop for LoopbackProxyServer {
+    fn drop(&mut self) {
+        let _ = self.shutdown_tx.send(true);
     }
 }
 

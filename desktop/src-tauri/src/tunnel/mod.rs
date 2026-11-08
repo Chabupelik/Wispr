@@ -34,6 +34,9 @@ impl TunnelManager {
     pub async fn init_global_proxy_listener(&self, listener: tokio::net::TcpListener) -> Result<(), String> {
         let server = LoopbackProxyServer::from_listener(listener)?;
         let mut guard = self.proxy_server.lock();
+        if let Some(old) = guard.take() {
+            old.shutdown();
+        }
         *guard = Some(server);
         Ok(())
     }
@@ -41,6 +44,9 @@ impl TunnelManager {
     pub async fn init_global_proxy(&self, proxy_port: u16) -> Result<(), String> {
         let server = LoopbackProxyServer::start(proxy_port).await?;
         let mut guard = self.proxy_server.lock();
+        if let Some(old) = guard.take() {
+            old.shutdown();
+        }
         *guard = Some(server);
         Ok(())
     }
@@ -90,6 +96,14 @@ impl TunnelManager {
                 client.close();
             }
             *wisp_guard = None;
+        }
+    }
+
+    pub fn shutdown(&self) {
+        self.stop();
+        let mut guard = self.proxy_server.lock();
+        if let Some(server) = guard.take() {
+            server.shutdown();
         }
     }
 

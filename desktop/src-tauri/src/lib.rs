@@ -11,7 +11,10 @@ use tauri::Manager;
 use tunnel::TunnelManager;
 
 #[tauri::command]
-fn force_exit() {
+fn force_exit(app: tauri::AppHandle) {
+    if let Some(tm) = app.try_state::<TunnelManager>() {
+        tm.shutdown();
+    }
     keyboard_hook::stop();
     std::process::exit(0);
 }
@@ -147,6 +150,9 @@ pub fn run() {
             match event {
                 tauri::WindowEvent::Destroyed => {
                     keyboard_hook::stop();
+                    if let Some(tm) = window.app_handle().try_state::<TunnelManager>() {
+                        tm.shutdown();
+                    }
                 }
                 tauri::WindowEvent::CloseRequested { .. } => {}
                 tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
