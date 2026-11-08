@@ -110,7 +110,10 @@ impl WispClient {
         };
 
         let token = parsed_url.path().trim_start_matches("/v1/live/");
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs().to_string();
+        let timestamp = match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(d) => d.as_secs().to_string(),
+            Err(_) => "0".to_string(),
+        };
         let salt = obfstr::obfstr!(env!("WISP_SALT")).to_string();
         
         let mut hasher = Sha256::new();
@@ -265,9 +268,9 @@ impl WispClient {
 
         let mut packet = Vec::new();
         packet.push(WISP_TYPE_CONNECT);
-        byteorder::WriteBytesExt::write_u32::<LittleEndian>(&mut packet, stream_id).unwrap();
+        let _ = byteorder::WriteBytesExt::write_u32::<LittleEndian>(&mut packet, stream_id);
         packet.push(WISP_STREAM_TCP);
-        byteorder::WriteBytesExt::write_u16::<LittleEndian>(&mut packet, port).unwrap();
+        let _ = byteorder::WriteBytesExt::write_u16::<LittleEndian>(&mut packet, port);
         packet.extend_from_slice(host.as_bytes());
 
         self.ws_tx
@@ -327,7 +330,7 @@ impl tokio::io::AsyncWrite for WispStream {
     ) -> std::task::Poll<Result<usize, std::io::Error>> {
         let mut packet = Vec::with_capacity(5 + buf.len());
         packet.push(WISP_TYPE_DATA);
-        byteorder::WriteBytesExt::write_u32::<LittleEndian>(&mut packet, self.stream_id).unwrap();
+        let _ = byteorder::WriteBytesExt::write_u32::<LittleEndian>(&mut packet, self.stream_id);
         packet.extend_from_slice(buf);
 
         match self.ws_tx.try_send(Message::Binary(packet.into())) {
@@ -346,7 +349,7 @@ impl tokio::io::AsyncWrite for WispStream {
     fn poll_shutdown(self: std::pin::Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), std::io::Error>> {
         let mut packet = Vec::with_capacity(6);
         packet.push(WISP_TYPE_CLOSE);
-        byteorder::WriteBytesExt::write_u32::<LittleEndian>(&mut packet, self.stream_id).unwrap();
+        let _ = byteorder::WriteBytesExt::write_u32::<LittleEndian>(&mut packet, self.stream_id);
         packet.push(0x01);
         let _ = self.ws_tx.try_send(Message::Binary(packet.into()));
         std::task::Poll::Ready(Ok(()))

@@ -3048,6 +3048,7 @@ name = "secure-browser"
 version = "1.0.0"
 dependencies = [
  "aes-gcm",
+ "anyhow",
  "base64 0.22.1",
  "byteorder",
  "bytes",
@@ -3067,6 +3068,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-log",
  "tauri-plugin-shell",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite",
  "url",

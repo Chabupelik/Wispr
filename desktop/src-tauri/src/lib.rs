@@ -1,5 +1,6 @@
 pub mod browser;
 pub mod commands;
+pub mod error;
 pub mod keyboard_hook;
 pub mod security;
 pub mod tunnel;
@@ -33,9 +34,16 @@ pub fn run() {
         &webview_data_dir,
     );
 
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("Failed to bind local loopback proxy port");
-    let proxy_port = listener.local_addr().expect("Failed to get local port").port();
+    let (listener, proxy_port) = match std::net::TcpListener::bind("127.0.0.1:0") {
+        Ok(l) => {
+            let port = l.local_addr().map(|a| a.port()).unwrap_or(0);
+            (Some(l), port)
+        }
+        Err(e) => {
+            log::error!("Failed to bind local loopback proxy port: {}", e);
+            (None, 0)
+        }
+    };
     let api_domain = option_env!("VITE_API_DOMAIN").unwrap_or("").to_string();
     let proxy_args = format!(
         "--proxy-server=127.0.0.1:{} --proxy-bypass-list=127.0.0.1,localhost,tauri.localhost,ipc.localhost,{} --disk-cache-size=1 --media-cache-size=1 --disable-http-cache --disable-features=AutofillServerCommunication,PasswordManager,UserAgentClientHint --disable-save-password-bubble --disable-single-click-autofill --enforce-webrtc-ip-permission-check --force-webrtc-ip-handling-policy=disable_non_proxied_udp --disable-quic --user-agent=\"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36\" --disable-blink-features=AutomationControlled",
@@ -47,22 +55,24 @@ pub fn run() {
     let tunnel_manager = TunnelManager::new();
     let tab_manager = TabManager::new();
 
-    let _ = listener.set_nonblocking(true);
-    let tm_clone = tunnel_manager.clone();
-    tauri::async_runtime::spawn(async move {
-        match tokio::net::TcpListener::from_std(listener) {
-            Ok(tokio_listener) => {
-                if let Err(e) = tm_clone.init_global_proxy_listener(tokio_listener).await {
-                    log::error!("Не удалось запустить локальный прокси: {}", e);
+    if let Some(listener) = listener {
+        let _ = listener.set_nonblocking(true);
+        let tm_clone = tunnel_manager.clone();
+        tauri::async_runtime::spawn(async move {
+            match tokio::net::TcpListener::from_std(listener) {
+                Ok(tokio_listener) => {
+                    if let Err(e) = tm_clone.init_global_proxy_listener(tokio_listener).await {
+                        log::error!("Не удалось запустить локальный прокси: {}", e);
+                    }
+                }
+                Err(e) => {
+                    log::error!("Ошибка инициализации tokio listener: {}", e);
                 }
             }
-            Err(e) => {
-                log::error!("Ошибка инициализации tokio listener: {}", e);
-            }
-        }
-    });
+        });
+    }
 
-    tauri::Builder::default()
+    if let Err(e) = tauri::Builder::default()
         .manage(tunnel_manager)
         .manage(tab_manager)
         .setup(move |app| {
@@ -151,5 +161,7 @@ pub fn run() {
             }
         })
         .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+    {
+        log::error!("Error while running tauri application: {}", e);
+    }
 }
