@@ -53,10 +53,27 @@ jobs:
               git clone https://github.com/Chabupelik/Wispr.git ~/Wispr
             fi
             cd ~/Wispr
-            git sparse-checkout init --cone
-            git sparse-checkout set backend telegram_bot docker-compose.yml Dockerfile database.sql .dockerignore
+
+            if [ -f ~/Wispr/backend/.env ] && [ ! -f ~/Wispr/.env ]; then
+              cp ~/Wispr/backend/.env ~/Wispr/.env
+            fi
+
             git fetch origin main
             git reset --hard origin/main
+            git clean -fd -e .env -e backend/.env -e releases/
+
+            git sparse-checkout init --cone
+            git sparse-checkout set backend telegram_bot docker-compose.yml Dockerfile database.sql .dockerignore .env.example
+            git sparse-checkout reapply
+
+            if [ ! -f ~/Wispr/.env ]; then
+              if [ -f ~/Wispr/backend/.env ]; then
+                cp ~/Wispr/backend/.env ~/Wispr/.env
+              elif [ -f ~/Wispr/.env.example ]; then
+                cp ~/Wispr/.env.example ~/Wispr/.env
+              fi
+            fi
+
             docker compose up -d --build
             docker image prune -f
 
@@ -152,3 +169,4 @@ jobs:
             --data-urlencode "text=${MSG}" \
             -d parse_mode="HTML" \
             -d disable_web_page_preview="true"
+
