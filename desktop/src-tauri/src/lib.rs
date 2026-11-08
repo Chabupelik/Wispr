@@ -21,21 +21,9 @@ fn force_exit(app: tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-        let path = std::path::Path::new(&local_app_data).join("com.google.chrome");
-        let _ = std::fs::remove_dir_all(&path);
-    }
-    if let Ok(app_data) = std::env::var("APPDATA") {
-        let path = std::path::Path::new(&app_data).join("com.google.chrome");
-        let _ = std::fs::remove_dir_all(&path);
-    }
-
     let webview_data_dir = std::env::temp_dir().join("ShellCache");
-    let _ = std::fs::remove_dir_all(&webview_data_dir);
-    std::env::set_var(
-        "WEBVIEW2_USER_DATA_FOLDER",
-        &webview_data_dir,
-    );
+    crate::security::wipe::clean_directory(&webview_data_dir);
+    std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", &webview_data_dir);
 
     let (listener, proxy_port) = match std::net::TcpListener::bind("127.0.0.1:0") {
         Ok(l) => {
