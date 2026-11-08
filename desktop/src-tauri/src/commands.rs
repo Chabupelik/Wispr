@@ -1,11 +1,12 @@
 use crate::browser::TabManager;
-use crate::security::device::get_hardware_fingerprint;
 use crate::tunnel::{ProxyConnectionInfo, TunnelManager};
-use tauri::{Emitter, Manager, State};
+use tauri::{Manager, State};
+
+pub use crate::browser::window::IS_FULLSCREEN;
 
 #[tauri::command]
 pub fn get_device_id() -> String {
-    get_hardware_fingerprint()
+    crate::security::device::get_hardware_fingerprint()
 }
 
 #[tauri::command]
@@ -15,29 +16,7 @@ pub async fn start_tunnel(
     token: String,
     manager: State<'_, TunnelManager>,
 ) -> Result<ProxyConnectionInfo, String> {
-    for (_label, wv) in app.webviews() {
-        let _ = wv.clear_all_browsing_data();
-    }
-
-    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-        let cache_path = std::path::Path::new(&local_app_data).join("EBWebView");
-        if cache_path.exists() {
-            let _ = std::fs::remove_dir_all(&cache_path);
-            log::info!("[TUNNEL] EBWebView HTTP cache removed: {:?}", cache_path);
-        }
-        let chrome_path = std::path::Path::new(&local_app_data).join("com.google.chrome");
-        if chrome_path.exists() {
-            let _ = std::fs::remove_dir_all(&chrome_path);
-            log::info!("[TUNNEL] com.google.chrome profile removed: {:?}", chrome_path);
-        }
-    }
-    let shell_cache = std::env::temp_dir().join("ShellCache");
-    if shell_cache.exists() {
-        let _ = std::fs::remove_dir_all(&shell_cache);
-        log::info!("[TUNNEL] ShellCache data dir removed: {:?}", shell_cache);
-    }
-    log::info!("[TUNNEL] All browsing data cleared before switching to Tunnel mode");
-
+    crate::security::wipe::clear_browsing_artifacts(&app);
     manager.start(&wisp_url, &token).await
 }
 
@@ -47,10 +26,29 @@ pub fn stop_tunnel(manager: State<'_, TunnelManager>) -> Result<(), String> {
     Ok(())
 }
 
+async fn run_tab_action<F>(
+    app: tauri::AppHandle,
+    tab_manager: State<'_, TabManager>,
+    action: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&TabManager, &tauri::Window) -> Result<(), String> + Send + 'static,
+{
+    let tm = tab_manager.inner().clone();
+    let app_clone = app.clone();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || {
+        let win = app_clone.get_window("main")
+            .or_else(|| app_clone.webview_windows().into_values().next().map(|w| w.as_ref().window().clone()));
+        let res = match win {
+            Some(w) => action(&tm, &w),
+            None => Err("Main window not found".to_string()),
+        };
+        let _ = tx.send(res);
+    }).map_err(|e| e.to_string())?;
 
-
-
-
+    rx.await.map_err(|e| e.to_string())?
+}
 
 #[tauri::command]
 pub async fn native_navigate_tab(
@@ -59,20 +57,7 @@ pub async fn native_navigate_tab(
     url: String,
     tab_manager: State<'_, TabManager>,
 ) -> Result<(), String> {
-    let tm = tab_manager.inner().clone();
-    let app_clone = app.clone();
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    app.run_on_main_thread(move || {
-        let win = app_clone.get_window("main")
-            .or_else(|| app_clone.webview_windows().into_values().next().map(|w| w.as_ref().window().clone()));
-        let res = match win {
-            Some(w) => tm.create_or_navigate_tab(&w, &tab_id, &url),
-            None => Err("Main window not found".to_string()),
-        };
-        let _ = tx.send(res);
-    }).map_err(|e| e.to_string())?;
-
-    rx.await.map_err(|e| e.to_string())?
+    run_tab_action(app, tab_manager, move |tm, win| tm.create_or_navigate_tab(win, &tab_id, &url)).await
 }
 
 #[tauri::command]
@@ -81,20 +66,7 @@ pub async fn native_switch_tab(
     tab_id: String,
     tab_manager: State<'_, TabManager>,
 ) -> Result<(), String> {
-    let tm = tab_manager.inner().clone();
-    let app_clone = app.clone();
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    app.run_on_main_thread(move || {
-        let win = app_clone.get_window("main")
-            .or_else(|| app_clone.webview_windows().into_values().next().map(|w| w.as_ref().window().clone()));
-        let res = match win {
-            Some(w) => tm.switch_to_tab(&w, &tab_id),
-            None => Err("Main window not found".to_string()),
-        };
-        let _ = tx.send(res);
-    }).map_err(|e| e.to_string())?;
-
-    rx.await.map_err(|e| e.to_string())?
+    run_tab_action(app, tab_manager, move |tm, win| tm.switch_to_tab(win, &tab_id)).await
 }
 
 #[tauri::command]
@@ -103,20 +75,7 @@ pub async fn native_close_tab(
     tab_id: String,
     tab_manager: State<'_, TabManager>,
 ) -> Result<(), String> {
-    let tm = tab_manager.inner().clone();
-    let app_clone = app.clone();
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    app.run_on_main_thread(move || {
-        let win = app_clone.get_window("main")
-            .or_else(|| app_clone.webview_windows().into_values().next().map(|w| w.as_ref().window().clone()));
-        let res = match win {
-            Some(w) => tm.close_tab(&w, &tab_id),
-            None => Err("Main window not found".to_string()),
-        };
-        let _ = tx.send(res);
-    }).map_err(|e| e.to_string())?;
-
-    rx.await.map_err(|e| e.to_string())?
+    run_tab_action(app, tab_manager, move |tm, win| tm.close_tab(win, &tab_id)).await
 }
 
 #[tauri::command]
@@ -125,20 +84,7 @@ pub async fn native_go_back(
     tab_id: String,
     tab_manager: State<'_, TabManager>,
 ) -> Result<(), String> {
-    let tm = tab_manager.inner().clone();
-    let app_clone = app.clone();
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    app.run_on_main_thread(move || {
-        let win = app_clone.get_window("main")
-            .or_else(|| app_clone.webview_windows().into_values().next().map(|w| w.as_ref().window().clone()));
-        let res = match win {
-            Some(w) => tm.go_back(&w, &tab_id),
-            None => Err("Main window not found".to_string()),
-        };
-        let _ = tx.send(res);
-    }).map_err(|e| e.to_string())?;
-
-    rx.await.map_err(|e| e.to_string())?
+    run_tab_action(app, tab_manager, move |tm, win| tm.go_back(win, &tab_id)).await
 }
 
 #[tauri::command]
@@ -147,20 +93,7 @@ pub async fn native_go_forward(
     tab_id: String,
     tab_manager: State<'_, TabManager>,
 ) -> Result<(), String> {
-    let tm = tab_manager.inner().clone();
-    let app_clone = app.clone();
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    app.run_on_main_thread(move || {
-        let win = app_clone.get_window("main")
-            .or_else(|| app_clone.webview_windows().into_values().next().map(|w| w.as_ref().window().clone()));
-        let res = match win {
-            Some(w) => tm.go_forward(&w, &tab_id),
-            None => Err("Main window not found".to_string()),
-        };
-        let _ = tx.send(res);
-    }).map_err(|e| e.to_string())?;
-
-    rx.await.map_err(|e| e.to_string())?
+    run_tab_action(app, tab_manager, move |tm, win| tm.go_forward(win, &tab_id)).await
 }
 
 #[tauri::command]
@@ -169,20 +102,7 @@ pub async fn native_reload(
     tab_id: String,
     tab_manager: State<'_, TabManager>,
 ) -> Result<(), String> {
-    let tm = tab_manager.inner().clone();
-    let app_clone = app.clone();
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    app.run_on_main_thread(move || {
-        let win = app_clone.get_window("main")
-            .or_else(|| app_clone.webview_windows().into_values().next().map(|w| w.as_ref().window().clone()));
-        let res = match win {
-            Some(w) => tm.reload(&w, &tab_id),
-            None => Err("Main window not found".to_string()),
-        };
-        let _ = tx.send(res);
-    }).map_err(|e| e.to_string())?;
-
-    rx.await.map_err(|e| e.to_string())?
+    run_tab_action(app, tab_manager, move |tm, win| tm.reload(win, &tab_id)).await
 }
 
 #[tauri::command]
@@ -190,20 +110,7 @@ pub async fn native_close_all_tabs(
     app: tauri::AppHandle,
     tab_manager: State<'_, TabManager>,
 ) -> Result<(), String> {
-    let tm = tab_manager.inner().clone();
-    let app_clone = app.clone();
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    app.run_on_main_thread(move || {
-        let win = app_clone.get_window("main")
-            .or_else(|| app_clone.webview_windows().into_values().next().map(|w| w.as_ref().window().clone()));
-        let res = match win {
-            Some(w) => tm.close_all_tabs(&w),
-            None => Err("Main window not found".to_string()),
-        };
-        let _ = tx.send(res);
-    }).map_err(|e| e.to_string())?;
-
-    rx.await.map_err(|e| e.to_string())?
+    run_tab_action(app, tab_manager, move |tm, win| tm.close_all_tabs(win)).await
 }
 
 #[tauri::command]
@@ -212,351 +119,59 @@ pub fn native_update_top_bar_height(
     height: f64,
     tab_manager: State<'_, TabManager>,
 ) {
-    if let Some(win) = app.get_window("main").or_else(|| app.windows().into_values().next().map(|w| w.clone())) {
+    if let Some(win) = app.get_window("main").or_else(|| app.windows().into_values().next()) {
         tab_manager.update_top_bar_height(&win, height);
     }
 }
 
 #[tauri::command]
 pub fn native_minimize_window(app: tauri::AppHandle) {
-    if let Some(win) = app.get_window("main").or_else(|| app.windows().into_values().next().map(|w| w.clone())) {
-        let _ = win.minimize();
-    }
+    crate::browser::window::minimize(&app);
 }
 
 #[tauri::command]
 pub fn native_maximize_window(app: tauri::AppHandle) {
-    if let Some(win) = app.get_window("main").or_else(|| app.windows().into_values().next().map(|w| w.clone())) {
-        if let Ok(is_maximized) = win.is_maximized() {
-            if is_maximized {
-                let _ = win.unmaximize();
-            } else {
-                let _ = win.maximize();
-            }
-        }
-    }
+    crate::browser::window::maximize(&app);
 }
-
-#[cfg(windows)]
-extern "system" {
-    fn SetWindowPos(
-        hWnd: isize,
-        hWndInsertAfter: isize,
-        X: i32,
-        Y: i32,
-        cx: i32,
-        cy: i32,
-        uFlags: u32,
-    ) -> i32;
-}
-
-static WAS_MAXIMIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-pub static IS_FULLSCREEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[tauri::command]
 pub fn native_toggle_fullscreen(app: tauri::AppHandle) -> Result<bool, String> {
-    if let Some(win) = app.get_window("main").or_else(|| app.windows().into_values().next().map(|w| w.clone())) {
-        let is_fs = win.is_fullscreen().map_err(|e| e.to_string())?;
-        let next_state = !is_fs;
-        IS_FULLSCREEN.store(next_state, std::sync::atomic::Ordering::SeqCst);
-
-        if next_state {
-            let is_max = win.is_maximized().unwrap_or(false);
-            WAS_MAXIMIZED.store(is_max, std::sync::atomic::Ordering::SeqCst);
-            if is_max {
-                let _ = win.unmaximize();
-            }
-            win.set_fullscreen(true).map_err(|e| e.to_string())?;
-            #[cfg(windows)]
-            {
-                if let Ok(hwnd) = win.hwnd() {
-                    if let Ok(Some(mon)) = win.current_monitor() {
-                        let pos = mon.position();
-                        let size = mon.size();
-                        unsafe {
-                            SetWindowPos(
-                                hwnd.0 as isize,
-                                0,
-                                pos.x,
-                                pos.y,
-                                size.width as i32,
-                                size.height as i32,
-                                0x0004 | 0x0020 | 0x0040,
-                            );
-                        }
-                    }
-                }
-            }
-        } else {
-            win.set_fullscreen(false).map_err(|e| e.to_string())?;
-            if WAS_MAXIMIZED.load(std::sync::atomic::Ordering::SeqCst) {
-                let _ = win.maximize();
-            }
-        }
-
-        let _ = win.emit("fullscreen-changed", next_state);
-
-        let tab_mgr = app.state::<TabManager>();
-        if next_state {
-            tab_mgr.set_top_bar_height(0.0);
-        } else {
-            tab_mgr.set_top_bar_height(84.0);
-        }
-        tab_mgr.sync_main_window_geometry(&win);
-
-        let app_clone = app.clone();
-        tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            if let Some(w) = app_clone.get_window("main") {
-                let tm = app_clone.state::<TabManager>();
-                tm.sync_main_window_geometry(&w);
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            if let Some(w) = app_clone.get_window("main") {
-                let tm = app_clone.state::<TabManager>();
-                tm.sync_main_window_geometry(&w);
-            }
-        });
-
-        Ok(next_state)
-    } else {
-        Err("Main window not found".to_string())
-    }
+    crate::browser::window::toggle_fullscreen(&app)
 }
 
 #[tauri::command]
 pub fn native_set_fullscreen(app: tauri::AppHandle, fullscreen: bool) -> Result<bool, String> {
-    if let Some(win) = app.get_window("main").or_else(|| app.windows().into_values().next().map(|w| w.clone())) {
-        let is_fs = win.is_fullscreen().map_err(|e| e.to_string())?;
-        IS_FULLSCREEN.store(fullscreen, std::sync::atomic::Ordering::SeqCst);
-        if is_fs != fullscreen {
-            if fullscreen {
-                let is_max = win.is_maximized().unwrap_or(false);
-                WAS_MAXIMIZED.store(is_max, std::sync::atomic::Ordering::SeqCst);
-                if is_max {
-                    let _ = win.unmaximize();
-                }
-                win.set_fullscreen(true).map_err(|e| e.to_string())?;
-                #[cfg(windows)]
-                {
-                    if let Ok(hwnd) = win.hwnd() {
-                        if let Ok(Some(mon)) = win.current_monitor() {
-                            let pos = mon.position();
-                            let size = mon.size();
-                            unsafe {
-                                SetWindowPos(
-                                    hwnd.0 as isize,
-                                    0,
-                                    pos.x,
-                                    pos.y,
-                                    size.width as i32,
-                                    size.height as i32,
-                                    0x0004 | 0x0020 | 0x0040,
-                                );
-                            }
-                        }
-                    }
-                }
-            } else {
-                win.set_fullscreen(false).map_err(|e| e.to_string())?;
-                if WAS_MAXIMIZED.load(std::sync::atomic::Ordering::SeqCst) {
-                    let _ = win.maximize();
-                }
-            }
-
-            let _ = win.emit("fullscreen-changed", fullscreen);
-
-            let tab_mgr = app.state::<TabManager>();
-            if fullscreen {
-                tab_mgr.set_top_bar_height(0.0);
-            } else {
-                tab_mgr.set_top_bar_height(84.0);
-            }
-            tab_mgr.sync_main_window_geometry(&win);
-
-            let app_clone = app.clone();
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                if let Some(w) = app_clone.get_window("main") {
-                    let tm = app_clone.state::<TabManager>();
-                    tm.sync_main_window_geometry(&w);
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-                if let Some(w) = app_clone.get_window("main") {
-                    let tm = app_clone.state::<TabManager>();
-                    tm.sync_main_window_geometry(&w);
-                }
-            });
-        }
-        Ok(fullscreen)
-    } else {
-        Err("Main window not found".to_string())
-    }
+    crate::browser::window::set_fullscreen(&app, fullscreen)
 }
 
 #[tauri::command]
 pub fn native_is_fullscreen(app: tauri::AppHandle) -> Result<bool, String> {
-    if let Some(win) = app.get_window("main").or_else(|| app.windows().into_values().next().map(|w| w.clone())) {
-        win.is_fullscreen().map_err(|e| e.to_string())
-    } else {
-        Err("Main window not found".to_string())
-    }
+    crate::browser::window::is_fullscreen(&app)
 }
 
 #[tauri::command]
 pub fn native_show_fullscreen_header(app: tauri::AppHandle, show: bool) -> Result<(), String> {
-    if let Some(win) = app.get_window("main").or_else(|| app.windows().into_values().next().map(|w| w.clone())) {
-        if let Ok(true) = win.is_fullscreen() {
-            let _ = win.emit("show-fullscreen-header", show);
-        }
-        Ok(())
-    } else {
-        Err("Main window not found".to_string())
-    }
+    crate::browser::window::show_fullscreen_header(&app, show)
 }
 
 #[tauri::command]
 pub fn native_exit_fullscreen_if_active(app: tauri::AppHandle) -> Result<bool, String> {
-    if let Some(win) = app.get_window("main").or_else(|| app.windows().into_values().next().map(|w| w.clone())) {
-        if let Ok(true) = win.is_fullscreen() {
-            IS_FULLSCREEN.store(false, std::sync::atomic::Ordering::SeqCst);
-            win.set_fullscreen(false).map_err(|e| e.to_string())?;
-            if WAS_MAXIMIZED.load(std::sync::atomic::Ordering::SeqCst) {
-                let _ = win.maximize();
-            }
-            let _ = win.emit("fullscreen-changed", false);
-
-            let tab_mgr = app.state::<TabManager>();
-            tab_mgr.set_top_bar_height(84.0);
-            tab_mgr.sync_main_window_geometry(&win);
-
-            let app_clone = app.clone();
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                if let Some(w) = app_clone.get_window("main") {
-                    let tm = app_clone.state::<TabManager>();
-                    tm.sync_main_window_geometry(&w);
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-                if let Some(w) = app_clone.get_window("main") {
-                    let tm = app_clone.state::<TabManager>();
-                    tm.sync_main_window_geometry(&w);
-                }
-            });
-
-            return Ok(true);
-        }
-        Ok(false)
-    } else {
-        Err("Main window not found".to_string())
-    }
-}
-
-#[tauri::command]
-pub fn self_destruct() {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CHILD_FLAGS: u32 = 0x0800_0000 | 0x0000_0200 | 0x0100_0000;
-
-        let pid = std::process::id();
-        let exe = std::env::current_exe()
-            .map(|p| p.to_string_lossy().replace('\'', "''"))
-            .unwrap_or_default();
-
-        if exe.is_empty() {
-            log::error!("current_exe() failed");
-        } else {
-            let sysroot = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
-            let ps_exe = std::path::Path::new(&sysroot)
-                .join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
-
-            let script = format!(
-                r#"$deadline=(Get-Date).AddSeconds(30)
-while((Get-Process -Id {pid} -ErrorAction SilentlyContinue) -and ((Get-Date) -lt $deadline)){{ Start-Sleep -Milliseconds 200 }}
-$p='{exe}'
-try{{
-    $fs=[IO.File]::Open($p,'Open','ReadWrite','None')
-    $len=$fs.Length
-    $buf=New-Object byte[] (1048576)
-    while($fs.Position -lt $len){{
-        $n=[Math]::Min(1048576,[int]($len-$fs.Position))
-        $fs.Write($buf,0,$n)
-    }}
-    $fs.Flush($true)
-    $fs.Close()
-}}catch{{}}
-try{{
-    Remove-Item -LiteralPath $p -Force
-}}catch{{}}
-Remove-Item -LiteralPath (Join-Path $env:TEMP 'ShellCache') -Recurse -Force -ErrorAction SilentlyContinue
-"#
-            );
-
-            match std::process::Command::new(&ps_exe)
-                .args([
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-EncodedCommand",
-                    &powershell_encoded(&script),
-                ])
-                .creation_flags(CHILD_FLAGS)
-                .spawn()
-            {
-                Ok(_) => log::debug!("SPAWNED pid={pid} exe={exe}"),
-                Err(e) => log::error!("SPAWN_ERR: {} (ps={:?})", e, ps_exe),
-            }
-        }
-    }
-
-    std::process::exit(0);
-}
-
-#[cfg(windows)]
-fn powershell_encoded(script: &str) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut bytes = Vec::with_capacity(script.len() * 2);
-    for unit in script.encode_utf16() {
-        bytes.push(unit as u8);
-        bytes.push((unit >> 8) as u8);
-    }
-    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
-    for chunk in bytes.chunks(3) {
-        let b = [
-            chunk[0],
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-        ];
-        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
-        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
-        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { ALPHABET[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { ALPHABET[n as usize & 63] as char } else { '=' });
-    }
-    out
+    crate::browser::window::exit_fullscreen_if_active(&app)
 }
 
 #[tauri::command]
 pub fn native_close_window(app: tauri::AppHandle) {
-    if let Some(win) = app.get_window("main").or_else(|| app.windows().into_values().next().map(|w| w.clone())) {
-        let _ = win.close();
-    }
+    crate::browser::window::close(&app);
 }
 
 #[tauri::command]
 pub fn native_set_window_title(app: tauri::AppHandle, title: String) {
-    if let Some(win) = app.get_window("main").or_else(|| app.windows().into_values().next().map(|w| w.clone())) {
-        let _ = win.set_title(&title);
-    }
+    crate::browser::window::set_title(&app, &title);
 }
 
 #[tauri::command]
 pub fn native_start_dragging(app: tauri::AppHandle) {
-    if let Some(win) = app.get_window("main").or_else(|| app.windows().into_values().next().map(|w| w.clone())) {
-        let _ = win.start_dragging();
-    }
+    crate::browser::window::start_dragging(&app);
 }
 
 #[tauri::command]
@@ -605,57 +220,10 @@ pub fn native_set_zoom(
     zoom_factor: f64,
     tab_manager: State<'_, TabManager>,
 ) -> Result<(), String> {
-    if let Some(win) = app.get_window("main").or_else(|| app.windows().into_values().next().map(|w| w.clone())) {
+    if let Some(win) = app.get_window("main").or_else(|| app.windows().into_values().next()) {
         tab_manager.set_zoom(&win, &tab_id, zoom_factor)?;
     }
     Ok(())
-}
-
-
-#[tauri::command]
-pub fn native_open_path(path: String) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("explorer")
-            .arg(&path)
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = path;
-        Ok(())
-    }
-}
-
-#[tauri::command]
-pub fn native_show_in_folder(path: String) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("explorer")
-            .arg("/select,")
-            .arg(&path)
-            .spawn()
-            .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = path;
-        Ok(())
-    }
-}
-
-#[tauri::command]
-pub fn native_get_downloads_dir() -> String {
-    if let Ok(user_profile) = std::env::var("USERPROFILE") {
-        let downloads = std::path::Path::new(&user_profile).join("Downloads");
-        if downloads.exists() {
-            return downloads.to_string_lossy().to_string();
-        }
-    }
-    ".".to_string()
 }
 
 #[tauri::command]
@@ -666,4 +234,24 @@ pub fn native_open_new_tab(app: tauri::AppHandle, url: String) {
     }
     use tauri::Emitter;
     let _ = app.emit("open-new-tab", NewTabPayload { url });
+}
+
+#[tauri::command]
+pub fn native_open_path(path: String) -> Result<(), String> {
+    crate::browser::window::open_path(&path)
+}
+
+#[tauri::command]
+pub fn native_show_in_folder(path: String) -> Result<(), String> {
+    crate::browser::window::show_in_folder(&path)
+}
+
+#[tauri::command]
+pub fn native_get_downloads_dir() -> String {
+    crate::browser::window::get_downloads_dir()
+}
+
+#[tauri::command]
+pub fn self_destruct() {
+    crate::security::self_destruct::execute();
 }

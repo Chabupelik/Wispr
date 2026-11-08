@@ -1,3 +1,5 @@
+pub mod window;
+
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
