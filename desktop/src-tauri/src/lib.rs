@@ -32,8 +32,10 @@ pub fn run() {
         "WEBVIEW2_USER_DATA_FOLDER",
         &webview_data_dir,
     );
-    
-    let proxy_port = option_env!("VITE_LOCAL_PROXY_PORT").unwrap_or("11338").to_string();
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("Failed to bind local loopback proxy port");
+    let proxy_port = listener.local_addr().expect("Failed to get local port").port();
     let api_domain = option_env!("VITE_API_DOMAIN").unwrap_or("").to_string();
     let proxy_args = format!(
         "--proxy-server=127.0.0.1:{} --proxy-bypass-list=127.0.0.1,localhost,tauri.localhost,ipc.localhost,{} --disk-cache-size=1 --media-cache-size=1 --disable-http-cache --disable-features=AutofillServerCommunication,PasswordManager,UserAgentClientHint --disable-save-password-bubble --disable-single-click-autofill --enforce-webrtc-ip-permission-check --force-webrtc-ip-handling-policy=disable_non_proxied_udp --disable-quic --user-agent=\"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36\" --disable-blink-features=AutomationControlled",
@@ -44,19 +46,26 @@ pub fn run() {
 
     let tunnel_manager = TunnelManager::new();
     let tab_manager = TabManager::new();
-    
-    let port_num = proxy_port.parse::<u16>().unwrap_or(11338);
+
+    let _ = listener.set_nonblocking(true);
     let tm_clone = tunnel_manager.clone();
     tauri::async_runtime::spawn(async move {
-        if let Err(e) = tm_clone.init_global_proxy(port_num).await {
-            log::error!("Не удалось запустить локальный прокси: {}", e);
+        match tokio::net::TcpListener::from_std(listener) {
+            Ok(tokio_listener) => {
+                if let Err(e) = tm_clone.init_global_proxy_listener(tokio_listener).await {
+                    log::error!("Не удалось запустить локальный прокси: {}", e);
+                }
+            }
+            Err(e) => {
+                log::error!("Ошибка инициализации tokio listener: {}", e);
+            }
         }
     });
 
     tauri::Builder::default()
         .manage(tunnel_manager)
         .manage(tab_manager)
-        .setup(|app| {
+        .setup(move |app| {
             #[cfg(debug_assertions)]
             {
                 let desktop_path = if let Ok(user_profile) = std::env::var("USERPROFILE") {
@@ -80,7 +89,7 @@ pub fn run() {
                 log::info!("=== WISP DIAGNOSTIC START ===");
                 log::info!("[CONFIG] VITE_API_BASE = {}", option_env!("VITE_API_BASE").unwrap_or("<не задан>"));
                 log::info!("[CONFIG] VITE_API_DOMAIN = {}", option_env!("VITE_API_DOMAIN").unwrap_or("<не задан>"));
-                log::info!("[CONFIG] VITE_LOCAL_PROXY_PORT = {}", option_env!("VITE_LOCAL_PROXY_PORT").unwrap_or("<не задан>"));
+                log::info!("[CONFIG] LOCAL_PROXY_PORT = {}", proxy_port);
                 log::info!("[CONFIG] VITE_UPSTREAM_PROXY = {}", option_env!("VITE_UPSTREAM_PROXY").unwrap_or("<не задан — прямое соединение>"));
                 log::info!("[CONFIG] WISP_SALT задан = {}", if option_env!("WISP_SALT").is_some() { "да" } else { "НЕТ — ошибка!" });
                 log::info!("=== WISP DIAGNOSTIC END ===");

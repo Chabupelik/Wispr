@@ -4,20 +4,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use parking_lot::Mutex;
 
-/// Режим работы прокси-сервера.
-/// 
-/// - `Transparent` — Фейк-браузер: запросы идут напрямую (как обычный браузер, без VPN).
-/// - `Tunnel` — Скрытый браузер: ВСЕ запросы идут ТОЛЬКО через WISP. 
-///   Если WISP недоступен — возвращается ошибка, но НИКОГДА не прямое соединение.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ProxyMode {
-    /// Прямой доступ. Используется в фейк-браузере (до авторизации).
     Transparent,
-    /// Туннельный режим. Ни один запрос не должен пройти напрямую.
     Tunnel,
 }
 
-/// Локальный прокси-сервер
 pub struct LoopbackProxyServer {
     pub port: u16,
     pub wisp_client: Arc<Mutex<Option<WispClient>>>,
@@ -25,13 +17,21 @@ pub struct LoopbackProxyServer {
 }
 
 impl LoopbackProxyServer {
-    /// Стартует прокси при запуске приложения.
-    /// Изначально запускается в Transparent режиме (фейк-браузер).
     pub async fn start(proxy_port: u16) -> Result<Self, String> {
-        let listener = TcpListener::bind(format!("127.0.0.1:{}", proxy_port))
-            .await
-            .unwrap_or_else(|e| panic!("FATAL: Failed to bind proxy port {}: {}", proxy_port, e));
+        let listener = if proxy_port == 0 {
+            TcpListener::bind("127.0.0.1:0").await
+        } else {
+            match TcpListener::bind(format!("127.0.0.1:{}", proxy_port)).await {
+                Ok(l) => Ok(l),
+                Err(_) => TcpListener::bind("127.0.0.1:0").await,
+            }
+        }
+        .map_err(|e| format!("Failed to bind proxy listener: {}", e))?;
 
+        Self::from_listener(listener)
+    }
+
+    pub fn from_listener(listener: TcpListener) -> Result<Self, String> {
         let port = listener
             .local_addr()
             .map_err(|e| format!("Failed to get local port: {}", e))?
@@ -51,7 +51,7 @@ impl LoopbackProxyServer {
                         let w = wisp_clone.clone();
                         let m = mode_clone.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_client_connection(stream, w, m).await {
+                            if let Err(e) = handle_client_connection(stream, w, m, port).await {
                                 log::debug!("[LOOPBACK] Ошибка обработки соединения: {:?}", e);
                             }
                         });
@@ -66,7 +66,6 @@ impl LoopbackProxyServer {
         Ok(Self { port, wisp_client, mode })
     }
 
-    /// Устанавливает режим работы прокси.
     pub fn set_mode(&self, new_mode: ProxyMode) {
         let mut guard = self.mode.lock();
         log::info!("[LOOPBACK PROXY] Смена режима: {:?} -> {:?}", *guard, new_mode);
@@ -74,8 +73,6 @@ impl LoopbackProxyServer {
     }
 }
 
-/// Получает живой WispClient или возвращает ошибку, объясняя причину.
-/// Если клиент есть, но WebSocket мёртв — обнуляет его и возвращает ошибку.
 fn get_live_wisp_client(wisp_ref: &Arc<Mutex<Option<WispClient>>>) -> Result<WispClient, String> {
     let mut guard = wisp_ref.lock();
     match guard.as_ref() {
@@ -83,7 +80,6 @@ fn get_live_wisp_client(wisp_ref: &Arc<Mutex<Option<WispClient>>>) -> Result<Wis
             if client.is_alive() {
                 Ok(client.clone())
             } else {
-                // WebSocket умер, обнуляем клиент
                 log::warn!("[LOOPBACK] WISP клиент мёртв (WebSocket разорван), очищаем");
                 *guard = None;
                 Err("WISP-соединение разорвано (WebSocket dead)".to_string())
@@ -93,7 +89,6 @@ fn get_live_wisp_client(wisp_ref: &Arc<Mutex<Option<WispClient>>>) -> Result<Wis
     }
 }
 
-/// Отправляет HTTP 502 ошибку клиенту с описанием проблемы.
 async fn send_502_error(
     client_stream: &mut TcpStream,
     reason: &str,
@@ -120,11 +115,11 @@ async fn send_502_error(
     Ok(())
 }
 
-/// Обрабатывает входящие HTTP / HTTPS (CONNECT) соединения от WebView2
 async fn handle_client_connection(
     mut client_stream: TcpStream,
     wisp_ref: Arc<Mutex<Option<WispClient>>>,
     mode_ref: Arc<Mutex<ProxyMode>>,
+    proxy_port: u16,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut buf = [0u8; 8192];
     let n = client_stream.read(&mut buf).await?;
@@ -143,13 +138,11 @@ async fn handle_client_connection(
     let method = parts.next().unwrap_or("");
     let target = parts.next().unwrap_or("");
 
-    // Считываем текущий режим работы
     let current_mode = {
         let guard = mode_ref.lock();
         *guard
     };
 
-    // Находим конец HTTP заголовков для восстановления дополнительных данных (например, TLS ClientHello)
     let mut header_end = 0;
     for i in 0..n.saturating_sub(3) {
         if &buf[i..i + 4] == b"\r\n\r\n" {
@@ -163,28 +156,20 @@ async fn handle_client_connection(
 
         match current_mode {
             ProxyMode::Tunnel => {
-                // ====== РЕЖИМ ТУННЕЛЯ: ВСЁ ТОЛЬКО ЧЕРЕЗ WISP ======
                 match get_live_wisp_client(&wisp_ref) {
                     Ok(wisp_client) => {
-                        // Пытаемся создать WISP-стрим
                         match wisp_client.create_stream(&host, port).await {
                             Ok(mut wisp_stream) => {
-                                // Отвечаем браузеру что туннель установлен
                                 client_stream
                                     .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                                     .await?;
-                                // Пересылаем дополнительные данные (TLS ClientHello), если есть
                                 if header_end > 0 && n > header_end {
                                     wisp_stream.write_all(&buf[header_end..n]).await?;
                                 }
                                 let _ = tokio::io::copy_bidirectional(&mut client_stream, &mut wisp_stream).await;
                             }
                             Err(e) => {
-                                // create_stream не удался — WISP канал мог закрыться
                                 log::error!("[LOOPBACK TUNNEL] Ошибка создания WISP-стрима для {}:{}: {}", host, port, e);
-                                // Не отправляем 200 — WebView2 увидит сброс соединения
-                                // Для CONNECT мы не можем послать HTML-ошибку (это HTTPS),
-                                // поэтому просто закрываем соединение. WebView покажет ERR_TUNNEL_CONNECTION_FAILED.
                                 client_stream
                                     .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
                                     .await?;
@@ -192,7 +177,6 @@ async fn handle_client_connection(
                         }
                     }
                     Err(reason) => {
-                        // WISP клиент недоступен — НЕ ФОЛЛБЕЧИМ, блокируем
                         log::warn!("[LOOPBACK TUNNEL] CONNECT {}:{} ЗАБЛОКИРОВАН — WISP недоступен: {}", host, port, reason);
                         client_stream
                             .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
@@ -201,7 +185,6 @@ async fn handle_client_connection(
                 }
             }
             ProxyMode::Transparent => {
-                // ====== ПРОЗРАЧНЫЙ РЕЖИМ: ПРЯМОЕ СОЕДИНЕНИЕ (ФЕЙК-БРАУЗЕР) ======
                 client_stream
                     .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                     .await?;
@@ -213,10 +196,7 @@ async fn handle_client_connection(
             }
         }
     } else {
-        // Обработка обычных HTTP-запросов (не CONNECT) и PAC-скрипта
         if target.ends_with("/proxy.pac") {
-            let proxy_port = option_env!("VITE_LOCAL_PROXY_PORT").unwrap_or("11338").to_string();
-
             let pac_script = format!(
                 "function FindProxyForURL(url, host) {{ if (shExpMatch(host, '127.0.0.1') || shExpMatch(host, 'localhost') || shExpMatch(host, 'tauri.localhost') || shExpMatch(host, 'ipc.localhost')) return 'DIRECT'; return 'PROXY 127.0.0.1:{}'; }}",
                 proxy_port
