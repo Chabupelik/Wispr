@@ -73,9 +73,25 @@ await redis.connect().catch((err) => {
 	console.error("[REDIS CONNECT ERROR]", err);
 });
 
-// Инициализация списков из БД
 let allowedIps = [];
 let allowedTgIds = new Map();
+let allowedIpExactSet = new Set();
+let allowedIpRanges = [];
+const ipCheckCache = new Map();
+const IP_CACHE_MAX_SIZE = 2000;
+
+function refreshIpStructures() {
+	ipCheckCache.clear();
+	allowedIpExactSet = new Set();
+	allowedIpRanges = [];
+	for (const val of allowedIps) {
+		if (val.includes('/')) {
+			allowedIpRanges.push(val);
+		} else {
+			allowedIpExactSet.add(val);
+		}
+	}
+}
 
 const client = await db.connect();
 try {
@@ -167,6 +183,7 @@ async function loadWhitelists() {
 		}
 		allowedIps = ips;
 		allowedTgIds = tgs;
+		refreshIpStructures();
 		console.log(`[FIREWALL] Loaded ${ips.length} IPs and ${tgs.size} TG IDs.`);
 	} catch (e) {
 		console.error("[FIREWALL] Error loading whitelists:", e);
@@ -174,11 +191,24 @@ async function loadWhitelists() {
 }
 await loadWhitelists();
 
-// Проверка IP адреса на соответствие белому списку
 function isIpAllowed(clientIp) {
-	if (allowedIps.includes('all')) return true;
+	if (!clientIp) return false;
+	if (allowedIpExactSet.has('all')) return true;
 	if (allowedIps.length === 0) return false;
-	return ipRangeCheck(clientIp, allowedIps);
+	if (allowedIpExactSet.has(clientIp)) return true;
+	if (allowedIpRanges.length === 0) return false;
+
+	if (ipCheckCache.has(clientIp)) {
+		return ipCheckCache.get(clientIp);
+	}
+
+	const isMatch = ipRangeCheck(clientIp, allowedIpRanges);
+	if (ipCheckCache.size >= IP_CACHE_MAX_SIZE) {
+		const firstKey = ipCheckCache.keys().next().value;
+		ipCheckCache.delete(firstKey);
+	}
+	ipCheckCache.set(clientIp, isMatch);
+	return isMatch;
 }
 
 // Настройка Wisp-сервера
@@ -1242,7 +1272,10 @@ fastify.post("/api/admin/whitelists", { preHandler: verifyBotToken }, async (req
 			"INSERT INTO whitelists (type, value, name) VALUES ($1, $2, $3) ON CONFLICT (type, value) DO UPDATE SET name = EXCLUDED.name",
 			[type, value, name || null]
 		);
-		if (type === 'ip' && !allowedIps.includes(value)) allowedIps.push(value);
+		if (type === 'ip') {
+			if (!allowedIps.includes(value)) allowedIps.push(value);
+			refreshIpStructures();
+		}
 		if (type === 'tg_id') allowedTgIds.set(value, name || null);
 		return { status: "ok" };
 	} catch (err) {
@@ -1261,7 +1294,10 @@ fastify.delete("/api/admin/whitelists", { preHandler: verifyBotToken }, async (r
 			"DELETE FROM whitelists WHERE type = $1 AND value = $2",
 			[type, value]
 		);
-		if (type === 'ip') allowedIps = allowedIps.filter(v => v !== value);
+		if (type === 'ip') {
+			allowedIps = allowedIps.filter(v => v !== value);
+			refreshIpStructures();
+		}
 		if (type === 'tg_id') allowedTgIds.delete(value);
 		return { status: "ok" };
 	} catch (err) {
