@@ -1,4 +1,3 @@
-// backend/src/index.js
 import { join } from "node:path";
 import { hostname } from "node:os";
 import { existsSync, statSync, createReadStream } from "node:fs";
@@ -17,10 +16,8 @@ import { LogService } from "./services/LogService.js";
 
 const BOT_API_SECRET = process.env.API_SECRET || process.env.BOT_TOKEN;
 
-// Хранилище активных Wisp сокетов: userId -> Set(socket)
 const activeWispSockets = new Map();
 
-// --- Multi-Domain Distribution ---
 const rootDomain = process.env.ROOT_DOMAIN;
 const WISP_DOMAINS = [
 	{ domain: `stream.${rootDomain}`, weight: 1 },
@@ -30,34 +27,32 @@ const WISP_DOMAINS = [
 	{ domain: `assets.${rootDomain}`, weight: 1 },
 ];
 
-// userId -> { domain, sessionBytes, connectedAt }
 const activeUserDomains = new Map();
-// In-memory traffic counters: userId -> { session: number, delta: number }
 const trafficCounters = new Map();
 
 const activeSseClients = new Map();
 
 setInterval(() => {
-	for (const [userId, clients] of activeSseClients.entries()) {
-		const alive = [];
-		for (const res of clients) {
-			if (res.raw.destroyed || res.raw.writableEnded) {
+	for (const [userId, userClients] of activeSseClients.entries()) {
+		for (const client of userClients) {
+			if (client.destroyed || client.writableEnded || !client.writable) {
+				userClients.delete(client);
+				try { client.destroy(); } catch (_) { }
 				continue;
 			}
 			try {
-				res.raw.write(': ping\n\n');
-				alive.push(res);
-			} catch (_) { }
+				client.write(': ping\n\n');
+			} catch (_) {
+				userClients.delete(client);
+				try { client.destroy(); } catch (_) { }
+			}
 		}
-		if (alive.length === 0) {
+		if (userClients.size === 0) {
 			activeSseClients.delete(userId);
-		} else if (alive.length !== clients.length) {
-			activeSseClients.set(userId, alive);
 		}
 	}
 }, 20000);
 
-// Flush traffic deltas to Redis every 5 seconds
 setInterval(async () => {
 	for (const [userId, counter] of trafficCounters.entries()) {
 		if (counter.delta > 0) {
@@ -70,7 +65,6 @@ setInterval(async () => {
 	}
 }, 5000);
 
-// Инициализация БД и Redis
 const { Pool } = pg;
 const db = new Pool({ connectionString: process.env.DATABASE_URL });
 const wispLogService = new LogService(db);
@@ -133,11 +127,9 @@ try {
 			created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 		)
 	`);
-	// Автомиграция для старых баз
 	await client.query(`ALTER TABLE whitelists ADD COLUMN IF NOT EXISTS name VARCHAR(255)`);
 	await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS telegram_id VARCHAR(64)`);
 
-	// Таблица для логов wisp
 	await client.query(`
 		CREATE TABLE IF NOT EXISTS wisp_access_logs (
 			id BIGSERIAL PRIMARY KEY,
@@ -150,7 +142,6 @@ try {
 	await client.query(`CREATE INDEX IF NOT EXISTS idx_wisp_logs_created_at ON wisp_access_logs(created_at)`);
 	await client.query(`CREATE INDEX IF NOT EXISTS idx_wisp_logs_telegram_id ON wisp_access_logs(telegram_id)`);
 
-	// Таблица имен для HWID
 	await client.query(`
 		CREATE TABLE IF NOT EXISTS hwid_names (
 			hwid VARCHAR(255) PRIMARY KEY,
@@ -162,7 +153,6 @@ try {
 	client.release();
 }
 
-// Очистка старых логов устройств (старше 30 дней) каждый день
 setInterval(async () => {
 	try {
 		await db.query(`DELETE FROM device_events WHERE created_at < NOW() - INTERVAL '30 days'`);
@@ -171,7 +161,6 @@ setInterval(async () => {
 	}
 }, 24 * 60 * 60 * 1000);
 
-// Очистка логов Wisp (старше 3 дней) каждые 12 часов
 setInterval(async () => {
 	try {
 		await db.query(`DELETE FROM wisp_access_logs WHERE created_at < NOW() - INTERVAL '3 days'`);
@@ -219,7 +208,6 @@ function isIpAllowed(clientIp) {
 	return isMatch;
 }
 
-// Настройка Wisp-сервера
 logging.set_level(logging.NONE);
 Object.assign(wisp.options, {
 	allow_udp_streams: false,
@@ -229,14 +217,12 @@ Object.assign(wisp.options, {
 
 const internalWispServer = createServer();
 
-// Получаем базовый класс NodeTCPSocket штатным путем из dummy-коннекта
 const dummyConn = new wisp.ServerConnection({}, "/");
 const BaseTCPSocket = dummyConn.TCPSocket;
 
 internalWispServer.on("upgrade", (req, socket, head) => {
 	const telegramId = req.headers["x-telegram-id"];
 
-	// Динамически создаем класс-обертку, не ломая прототипы
 	class LoggedTCPSocket extends BaseTCPSocket {
 		constructor(hostname, port) {
 			super(hostname, port);
@@ -273,7 +259,6 @@ const fastify = Fastify({
 					res.setHeader("Cross-Origin-Embedder-Policy", "require-corp");
 				}
 
-				// Проверка IP адреса перед обработкой запроса
 				let clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
 				if (clientIp && typeof clientIp === 'string') clientIp = clientIp.split(',')[0].trim();
 
@@ -315,7 +300,6 @@ const fastify = Fastify({
 						return;
 					}
 
-					// Защита от сторонних WISP-клиентов и Replay-атак
 					const clientTimestamp = req.headers["x-wisp-timestamp"];
 					const clientSignature = req.headers["x-wisp-signature"];
 
@@ -333,7 +317,6 @@ const fastify = Fastify({
 						socket.destroy();
 						return;
 					}
-					// Окно 3600 секунд (1 час) — компенсирует сбитые часы на клиентах ЕСПД
 					if (Math.abs(Date.now() / 1000 - ts) > 3600) {
 						console.warn("[WISP AUTH] Replay attack или истекший timestamp (разница > 3600с)");
 						socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
@@ -375,12 +358,10 @@ const fastify = Fastify({
 					const userId = decoded.id;
 					const deviceHash = decoded.deviceHash || "unknown";
 
-					// 1. Проверка активности сессии в Redis (Single-Session Enforcement)
 					try {
 						const activeSession = await redis.get(`session:${userId}`);
 						if (activeSession) {
 							const sessionData = JSON.parse(activeSession);
-							// Если пришел запрос с другим хэшем
 							if (sessionData.deviceHash && sessionData.deviceHash !== deviceHash) {
 								console.warn(`[WISP AUTH] Отклонен сокет для user ${userId}: несовпадение deviceHash`);
 								socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
@@ -392,7 +373,6 @@ const fastify = Fastify({
 						console.error("[WISP REDIS ERROR]", redisErr);
 					}
 
-					// 2. Закрываем предыдущие активные сокеты этого пользователя (Single-Connection Lock)
 					const existingSockets = activeWispSockets.get(userId);
 					if (existingSockets && existingSockets.size > 0) {
 						for (const oldSocket of existingSockets) {
@@ -403,7 +383,6 @@ const fastify = Fastify({
 						activeWispSockets.delete(userId);
 					}
 
-					// Регистрация сокета
 					socket.__wispHandled = true;
 					const userSocketSet = activeWispSockets.get(userId) || new Set();
 					userSocketSet.add(socket);
@@ -439,7 +418,6 @@ const fastify = Fastify({
 							const internalWs = new WebSocket("ws://127.0.0.1:11339/", { headers: wsHeaders });
 							const messageBuffer = [];
 
-							// Init in-memory traffic counter for this user
 							if (!trafficCounters.has(userId)) {
 								trafficCounters.set(userId, { session: 0, delta: 0 });
 							} else {
@@ -472,7 +450,6 @@ const fastify = Fastify({
 								} catch (err) {
 									console.error("[WISP DECRYPT ERROR]", err.message);
 								}
-								// Count incoming traffic (from client)
 								const tc = trafficCounters.get(userId);
 								if (tc) { tc.session += data.length; tc.delta += data.length; }
 							});
@@ -499,7 +476,6 @@ const fastify = Fastify({
 								} catch (err) {
 									console.error("[WISP ENCRYPT ERROR]", err.message);
 								}
-								// Count outgoing traffic (to client)
 								const tc2 = trafficCounters.get(userId);
 								if (tc2) { tc2.session += data.length; tc2.delta += data.length; }
 							});
@@ -507,13 +483,11 @@ const fastify = Fastify({
 							clientWs.on("close", () => {
 								clearInterval(pingInterval);
 								internalWs.close();
-								// Flush remaining traffic delta to Redis
 								const tc3 = trafficCounters.get(userId);
 								if (tc3 && tc3.delta > 0) {
 									redis.incrBy(`traffic:${userId}:total`, tc3.delta).catch(() => { });
 									tc3.delta = 0;
 								}
-								// Clean up activeUserDomains
 								activeUserDomains.delete(userId);
 							});
 							internalWs.on("close", () => clientWs.close());
@@ -531,9 +505,6 @@ const fastify = Fastify({
 	},
 });
 
-
-
-// Middleware для E2EE шифрования API
 fastify.addHook('onRequest', async (req, reply) => {
 	console.log(`[HTTP REQ] ${req.method} ${req.url}`);
 });
@@ -588,7 +559,6 @@ fastify.addHook('onSend', async (req, reply, payload) => {
 	return payload;
 });
 
-// Добавляем поддержку raw body для application/octet-stream
 fastify.addContentTypeParser('application/octet-stream', { parseAs: 'buffer' }, (req, body, done) => {
 	done(null, body);
 });
@@ -609,7 +579,6 @@ fastify.register(fastifyCors, {
 	credentials: true,
 });
 
-// Middleware проверки Bearer JWT токена
 const checkAuth = async (req, reply) => {
 	const authHeader = req.headers["authorization"];
 	const token = authHeader && authHeader.split(" ")[1];
@@ -632,29 +601,23 @@ process.on("unhandledRejection", (reason) => {
 	console.error("[BACKEND CRITICAL] Unhandled rejection:", reason);
 });
 
-// ----------------------------------------------------
-// 0. НАЗНАЧЕНИЕ ПОДДОМЕНА ДЛЯ WISP-ТУННЕЛЯ
-// ----------------------------------------------------
 fastify.post("/api/tunnel/assign", async (req, reply) => {
 	await checkAuth(req, reply);
 	if (reply.sent) return;
 
 	const userId = req.user.id;
 
-	// Already assigned? Return existing
 	const existing = activeUserDomains.get(userId);
 	if (existing) {
 		return { status: "ok", domain: existing.domain };
 	}
 
-	// Count active users per domain
 	const domainCounts = {};
 	for (const d of WISP_DOMAINS) domainCounts[d.domain] = 0;
 	for (const [, info] of activeUserDomains) {
 		if (domainCounts[info.domain] !== undefined) domainCounts[info.domain]++;
 	}
 
-	// Pick domains with the lowest score, then pick randomly among them
 	let bestDomains = [];
 	let bestScore = Infinity;
 	for (const d of WISP_DOMAINS) {
@@ -678,41 +641,57 @@ fastify.post("/api/tunnel/assign", async (req, reply) => {
 	return { status: "ok", domain: bestDomain };
 });
 
-// ----------------------------------------------------
-// 0.5 SSE COMMAND CHANNEL & ADMIN DISCONNECT
-// ----------------------------------------------------
 fastify.get("/api/events", async (req, reply) => {
 	await checkAuth(req, reply);
 	if (reply.sent) return;
 
 	const userId = req.user.id;
+	reply.hijack();
 
-	reply.raw.setHeader('Content-Type', 'text/event-stream');
-	reply.raw.setHeader('Cache-Control', 'no-cache');
-	reply.raw.setHeader('Connection', 'keep-alive');
-	reply.raw.setHeader('Access-Control-Allow-Origin', '*');
+	const res = reply.raw;
+	if (req.raw.socket) {
+		req.raw.socket.setKeepAlive(true, 15000);
+		req.raw.socket.setNoDelay(true);
+	}
 
-	reply.raw.write('data: {"cmd":"connected"}\n\n');
+	res.writeHead(200, {
+		'Content-Type': 'text/event-stream',
+		'Cache-Control': 'no-cache, no-transform',
+		'Connection': 'keep-alive',
+		'Access-Control-Allow-Origin': '*'
+	});
+	res.write('data: {"cmd":"connected"}\n\n');
 
 	if (!activeSseClients.has(userId)) {
-		activeSseClients.set(userId, []);
+		activeSseClients.set(userId, new Set());
 	}
-	activeSseClients.get(userId).push(reply);
+	const userClients = activeSseClients.get(userId);
+	userClients.add(res);
 
 	let resolveConn;
 	const connPromise = new Promise((resolve) => {
 		resolveConn = resolve;
 	});
 
-	req.raw.on('close', () => {
-		const clients = activeSseClients.get(userId);
-		if (clients) {
-			const idx = clients.indexOf(reply);
-			if (idx !== -1) clients.splice(idx, 1);
-			if (clients.length === 0) activeSseClients.delete(userId);
+	const cleanup = () => {
+		const currentClients = activeSseClients.get(userId);
+		if (currentClients) {
+			currentClients.delete(res);
+			if (currentClients.size === 0) {
+				activeSseClients.delete(userId);
+			}
 		}
-		if (resolveConn) resolveConn();
-	});
+		if (resolveConn) {
+			resolveConn();
+			resolveConn = null;
+		}
+		try { res.destroy(); } catch (_) { }
+	};
+
+	req.raw.on('close', cleanup);
+	req.raw.on('error', cleanup);
+	res.on('close', cleanup);
+	res.on('error', cleanup);
 
 	await connPromise;
 });
@@ -729,17 +708,15 @@ fastify.post("/api/admin/command", async (req, reply) => {
 		return reply.code(400).send({ error: "user_id и command обязательны" });
 	}
 
-	// 1. Send SSE event to frontend
 	const clients = activeSseClients.get(user_id);
-	if (clients && clients.length > 0) {
-		for (const res of clients) {
+	if (clients && clients.size > 0) {
+		for (const client of clients) {
 			try {
-				res.raw.write(`data: ${JSON.stringify({ cmd: command })}\n\n`);
+				client.write(`data: ${JSON.stringify({ cmd: command })}\n\n`);
 			} catch (_) { }
 		}
 	}
 
-	// 2. If 'norm', gracefully allow time for SSE to reach frontend before killing WISP
 	if (command === 'norm') {
 		const sockets = activeWispSockets.get(user_id);
 		if (sockets) {
@@ -755,9 +732,6 @@ fastify.post("/api/admin/command", async (req, reply) => {
 	return { status: "ok" };
 });
 
-// ----------------------------------------------------
-// 1. РЕГИСТРАЦИЯ ПОЛЬЗОВАТЕЛЯ (через Telegram-бота)
-// ----------------------------------------------------
 fastify.post("/api/auth/register", async (req, reply) => {
 	const botToken = req.headers["x-bot-token"];
 	if (botToken !== BOT_API_SECRET) {
@@ -797,9 +771,6 @@ fastify.post("/api/auth/register", async (req, reply) => {
 	}
 });
 
-// ----------------------------------------------------
-// 2. ГЕНЕРАЦИЯ ОДНОРАЗОВОГО 6-ЗНАЧНОГО OTP (через Telegram-бота)
-// ----------------------------------------------------
 fastify.post("/api/auth/otp/generate", async (req, reply) => {
 	const botToken = req.headers["x-bot-token"];
 	if (botToken !== BOT_API_SECRET) {
@@ -819,10 +790,8 @@ fastify.post("/api/auth/otp/generate", async (req, reply) => {
 			return reply.code(404).send({ error: "Пользователь не найден или заблокирован" });
 		}
 
-		// Генерация 6-значного числового кода (100000 - 999999)
 		const otpCode = crypto.randomInt(100000, 999999).toString();
 
-		// Сохраняем в Redis с TTL 120 секунд
 		await redis.set(`otp:${otpCode}`, JSON.stringify({
 			userId: user.id,
 			username: user.username,
@@ -836,9 +805,6 @@ fastify.post("/api/auth/otp/generate", async (req, reply) => {
 	}
 });
 
-// ----------------------------------------------------
-// 3. ВХОД ПО ОДНОРАЗОВОМУ OTP (из браузера)
-// ----------------------------------------------------
 fastify.post("/api/auth/otp/verify", async (req, reply) => {
 	const { code, device_id } = req.body || {};
 	if (!code) {
@@ -852,7 +818,6 @@ fastify.post("/api/auth/otp/verify", async (req, reply) => {
 		}
 
 		const data = JSON.parse(raw);
-		// Одноразовый код: удаляем сразу после успешной валидации
 		await redis.del(`otp:${code}`);
 
 		const userId = data.userId;
@@ -864,13 +829,11 @@ fastify.post("/api/auth/otp/verify", async (req, reply) => {
 			.update(deviceId)
 			.digest('hex');
 
-		// Фиксация активной сессии в Redis (Single-Session Lock)
 		await redis.set(`session:${userId}`, JSON.stringify({
 			deviceHash,
 			updatedAt: Date.now(),
 		}), { EX: 7 * 24 * 60 * 60 });
 
-		// Короткоживущий AccessToken (15 минут) с привязкой к хэшу Device ID
 		const accessToken = jwt.sign(
 			{ id: userId, username, deviceHash },
 			process.env.JWT_SECRET,
@@ -904,13 +867,6 @@ fastify.post("/api/auth/otp/verify", async (req, reply) => {
 	}
 });
 
-// ----------------------------------------------------
-// 4. (УДАЛЕН) СТАНДАРТНЫЙ ВХОД ПО ЛОГИНУ И ПАРОЛЮ
-// ----------------------------------------------------
-
-// ----------------------------------------------------
-// 5. РОТАЦИЯ ТОКЕНОВ (REFRESH)
-// ----------------------------------------------------
 fastify.post("/api/auth/refresh", async (req, reply) => {
 	const { refresh_token, device_id } = req.body || {};
 	const cookieToken = req.headers.cookie?.match(/refreshToken=([^;]+)/)?.[1];
@@ -947,7 +903,6 @@ fastify.post("/api/auth/refresh", async (req, reply) => {
 		}
 		const deviceHash = decoded.deviceHash;
 
-		// Проверка Single-Session Lock
 		const sessionRaw = await redis.get(`session:${user.id}`);
 		if (sessionRaw) {
 			const sessionData = JSON.parse(sessionRaw);
@@ -956,7 +911,6 @@ fastify.post("/api/auth/refresh", async (req, reply) => {
 			}
 		}
 
-		// Обновляем метку времени сессии
 		await redis.set(`session:${user.id}`, JSON.stringify({
 			deviceHash,
 			updatedAt: Date.now(),
@@ -985,19 +939,14 @@ fastify.post("/api/auth/refresh", async (req, reply) => {
 	}
 });
 
-// ----------------------------------------------------
-// 6. ВЫХОД И ПРИНУДИТЕЛЬНЫЙ СБРОС ТУННЕЛЕЙ
-// ----------------------------------------------------
 fastify.post("/api/auth/logout", async (req, reply) => {
 	await checkAuth(req, reply);
 	if (reply.sent) return;
 
 	const userId = req.user.id;
 
-	// Удаляем сессию из Redis
 	await redis.del(`session:${userId}`).catch(() => { });
 
-	// Принудительно рвем все Wisp сокеты пользователя
 	const sockets = activeWispSockets.get(userId);
 	if (sockets) {
 		for (const s of sockets) {
@@ -1010,11 +959,6 @@ fastify.post("/api/auth/logout", async (req, reply) => {
 	return { status: "ok" };
 });
 
-
-
-// ----------------------------------------------------
-// 7. УПРАВЛЕНИЕ БЕЛЫМИ СПИСКАМИ (ADMIN API)
-// ----------------------------------------------------
 const verifyBotToken = (req, reply, done) => {
 	const botToken = req.headers["x-bot-token"];
 	if (!botToken || !BOT_API_SECRET || botToken.length !== BOT_API_SECRET.length) {
@@ -1026,7 +970,6 @@ const verifyBotToken = (req, reply, done) => {
 	done();
 };
 
-// Назначение имени для HWID
 fastify.post("/api/admin/hwid_name", { preHandler: verifyBotToken }, async (req, reply) => {
 	const { hwid, name } = req.body || {};
 	if (!hwid || !name) return reply.code(400).send({ error: "hwid and name required" });
@@ -1042,7 +985,6 @@ fastify.post("/api/admin/hwid_name", { preHandler: verifyBotToken }, async (req,
 	}
 });
 
-// Статистика трафика пользователей (для TG бота)
 fastify.get("/api/admin/traffic", { preHandler: verifyBotToken }, async (req, reply) => {
 	try {
 		const result = await db.query("SELECT id, username, is_active, telegram_id FROM users ORDER BY id ASC");
@@ -1245,7 +1187,6 @@ fastify.post("/api/device/event", async (req, reply) => {
 	}
 
 	let userId = null;
-	// Попытка получить user_id из заголовка Authorization (JWT), если пользователь залогинен
 	try {
 		const authHeader = req.headers.authorization;
 		if (authHeader && authHeader.startsWith('Bearer ')) {
@@ -1254,7 +1195,6 @@ fastify.post("/api/device/event", async (req, reply) => {
 			userId = decoded.id;
 		}
 	} catch (e) {
-		// Ignore if not logged in
 	}
 
 	try {
@@ -1348,7 +1288,6 @@ fastify.delete("/api/admin/users/:id", { preHandler: verifyBotToken }, async (re
 		const delRes = await db.query("DELETE FROM users WHERE id = $1", [id]);
 		console.log(`[DEBUG DELETE] DB delete result: ${delRes.rowCount}`);
 
-		// Invalidate active wisp session
 		for (const [key, sockets] of activeWispSockets.entries()) {
 			if (String(key) === String(id)) {
 				console.log(`[DEBUG DELETE] Found wisp sockets for ${id}`);
@@ -1368,13 +1307,9 @@ fastify.delete("/api/admin/users/:id", { preHandler: verifyBotToken }, async (re
 	}
 });
 
-// ----------------------------------------------------
-// DOWNLOAD ENDPOINT: /api/browser/download/:filename
-// ----------------------------------------------------
 fastify.get("/api/browser/download/:filename", async (req, reply) => {
 	const { filename } = req.params;
 
-	// Защита от path traversal
 	if (!filename || filename.includes("/") || filename.includes("\\") || filename.includes("..")) {
 		return reply.code(400).send({ error: "Некорректное имя файла" });
 	}
