@@ -11,13 +11,12 @@ use tunnel::TunnelManager;
 
 #[tauri::command]
 fn force_exit() {
+    keyboard_hook::stop();
     std::process::exit(0);
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Полное удаление всех данных (cookies, localStorage, cache) ДО запуска WebView2,
-    // чтобы избежать блокировки файлов и ERR_CACHE_READ_FAILURE
     if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
         let path = std::path::Path::new(&local_app_data).join("com.google.chrome");
         let _ = std::fs::remove_dir_all(&path);
@@ -27,9 +26,6 @@ pub fn run() {
         let _ = std::fs::remove_dir_all(&path);
     }
 
-    // WebView2 не может работать без папки данных на диске, поэтому перенаправляем её
-    // в %TEMP%\ShellCache — в LocalAppData/APPDATA приложение ничего не создаёт.
-    // Чистим её от прошлого запуска ДО инициализации WebView2.
     let webview_data_dir = std::env::temp_dir().join("ShellCache");
     let _ = std::fs::remove_dir_all(&webview_data_dir);
     std::env::set_var(
@@ -49,7 +45,6 @@ pub fn run() {
     let tunnel_manager = TunnelManager::new();
     let tab_manager = TabManager::new();
     
-    // Запускаем глобальный прокси-сервер на старте
     let port_num = proxy_port.parse::<u16>().unwrap_or(11338);
     let tm_clone = tunnel_manager.clone();
     tauri::async_runtime::spawn(async move {
@@ -62,7 +57,6 @@ pub fn run() {
         .manage(tunnel_manager)
         .manage(tab_manager)
         .setup(|app| {
-            // Логирование только в debug-сборках — в релизе не нужно
             #[cfg(debug_assertions)]
             {
                 let desktop_path = if let Ok(user_profile) = std::env::var("USERPROFILE") {
@@ -71,7 +65,6 @@ pub fn run() {
                     std::env::temp_dir()
                 };
 
-                // Только один таргет (Folder) — иначе будут дубли в логе
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
                         .level(log::LevelFilter::Debug)
@@ -133,10 +126,10 @@ pub fn run() {
         ])
         .on_window_event(|window, event| {
             match event {
-                tauri::WindowEvent::CloseRequested { .. } => {
-                    // Let Javascript intercept the close event to send the CLOSE network log
-                    // std::process::exit(0);
+                tauri::WindowEvent::Destroyed => {
+                    keyboard_hook::stop();
                 }
+                tauri::WindowEvent::CloseRequested { .. } => {}
                 tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
                     let app = window.app_handle();
                     let win = app.get_window("main").or_else(|| app.windows().into_values().next());
@@ -151,12 +144,3 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
-
-
-
-
-
-
-
-
-

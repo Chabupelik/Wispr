@@ -1,7 +1,5 @@
-// frontend/src-tauri/src/keyboard_hook.rs
-
 #[cfg(windows)]
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
 #[cfg(windows)]
 use std::sync::OnceLock;
 #[cfg(windows)]
@@ -13,6 +11,8 @@ static APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
 static HOOK: AtomicIsize = AtomicIsize::new(0);
 #[cfg(windows)]
 static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
+#[cfg(windows)]
+static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 
 #[cfg(windows)]
 #[derive(Clone, Copy)]
@@ -46,19 +46,20 @@ extern "system" {
         hmod: isize,
         dw_thread_id: u32,
     ) -> isize;
+    fn UnhookWindowsHookEx(hhk: isize) -> i32;
     fn CallNextHookEx(hhk: isize, n_code: i32, w_param: usize, l_param: isize) -> isize;
     fn GetForegroundWindow() -> isize;
     fn GetWindowThreadProcessId(h_wnd: isize, lpdw_process_id: *mut u32) -> u32;
+    fn GetCurrentThreadId() -> u32;
+    fn PostThreadMessageW(id_thread: u32, msg: u32, w_param: usize, l_param: isize) -> i32;
     fn GetAncestor(h_wnd: isize, ga_flags: u32) -> isize;
     fn IsChild(h_wnd_parent: isize, h_wnd: isize) -> i32;
     fn GetModuleHandleW(lp_module_name: *const u16) -> isize;
-    fn GetLastError() -> u32;
     fn GetMessageW(lp_msg: *mut MSG, h_wnd: isize, w_msg_filter_min: u32, w_msg_filter_max: u32) -> i32;
     fn TranslateMessage(lp_msg: *const MSG) -> i32;
     fn DispatchMessageW(lp_msg: *const MSG) -> isize;
 }
 
-/// Проверяет, принадлежит ли активное окно нашему приложению (главному окну или WebView2).
 #[cfg(windows)]
 unsafe fn is_our_app(fg_hwnd: isize) -> bool {
     if fg_hwnd == 0 {
@@ -66,14 +67,12 @@ unsafe fn is_our_app(fg_hwnd: isize) -> bool {
     }
     let our_pid = std::process::id();
 
-    // 1. Быстрая проверка прямого PID окна
     let mut fg_pid = 0u32;
     GetWindowThreadProcessId(fg_hwnd, &mut fg_pid);
     if fg_pid == our_pid {
         return true;
     }
 
-    // Получаем закэшированный HWND главного окна Tauri (или пробуем найти)
     let mut main_hwnd = MAIN_HWND.load(Ordering::SeqCst);
     if main_hwnd == 0 {
         if let Some(app) = APP_HANDLE.get() {
@@ -90,11 +89,11 @@ unsafe fn is_our_app(fg_hwnd: isize) -> bool {
         if fg_hwnd == main_hwnd {
             return true;
         }
-        let root = GetAncestor(fg_hwnd, 2); // GA_ROOT
+        let root = GetAncestor(fg_hwnd, 2);
         if root == main_hwnd {
             return true;
         }
-        let root_owner = GetAncestor(fg_hwnd, 3); // GA_ROOTOWNER
+        let root_owner = GetAncestor(fg_hwnd, 3);
         if root_owner == main_hwnd {
             return true;
         }
@@ -126,29 +125,25 @@ unsafe fn is_our_app(fg_hwnd: isize) -> bool {
 
 #[cfg(windows)]
 unsafe extern "system" fn hook_proc(n_code: i32, w_param: usize, l_param: isize) -> isize {
-    // HC_ACTION=0, WM_KEYDOWN=0x0100, WM_SYSKEYDOWN=0x0104
     if n_code >= 0 && (w_param == 0x0100 || w_param == 0x0104) {
         let kbd = *(l_param as *const KBDLLHOOKSTRUCT);
-        // VK_F11=0x7A, VK_ESCAPE=0x1B
         if kbd.vk_code == 0x7A || kbd.vk_code == 0x1B {
             let fg_hwnd = GetForegroundWindow();
             if is_our_app(fg_hwnd) {
                 if let Some(app) = APP_HANDLE.get() {
                     if kbd.vk_code == 0x7A {
-                        // F11: переключение полного экрана
                         let app_clone = app.clone();
                         let _ = app.run_on_main_thread(move || {
                             let _ = crate::commands::native_toggle_fullscreen(app_clone);
                         });
-                        return 1; // Клавиша перехвачена и поглощена — Windows не передает ее дальше
+                        return 1;
                     } else if kbd.vk_code == 0x1B {
-                        // Esc: выход из полного экрана (если активен)
                         if crate::commands::IS_FULLSCREEN.load(Ordering::SeqCst) {
                             let app_clone = app.clone();
                             let _ = app.run_on_main_thread(move || {
                                 let _ = crate::commands::native_exit_fullscreen_if_active(app_clone);
                             });
-                            return 1; // Клавиша перехвачена и поглощена
+                            return 1;
                         }
                     }
                 }
@@ -163,11 +158,9 @@ pub fn start(app: tauri::AppHandle) {
     {
         let _ = APP_HANDLE.set(app.clone());
 
-        // Заранее сохраняем HWND главного окна
         if let Some(win) = app.get_window("main").or_else(|| app.windows().into_values().next()) {
             if let Ok(hwnd) = win.hwnd() {
                 MAIN_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
-                eprintln!("[KEYBOARD_HOOK] Saved main HWND: 0x{:X}", hwnd.0 as usize);
             }
         }
 
@@ -175,16 +168,14 @@ pub fn start(app: tauri::AppHandle) {
             .name("keyboard_hook".to_string())
             .spawn(move || {
                 unsafe {
+                    let thread_id = GetCurrentThreadId();
+                    HOOK_THREAD_ID.store(thread_id, Ordering::SeqCst);
+
                     let hmod = GetModuleHandleW(std::ptr::null());
-                    eprintln!("[KEYBOARD_HOOK] hmod = 0x{:X}", hmod);
-                    // WH_KEYBOARD_LL=13, глобальный хук требует валидный hmod текущего модуля
                     let hook = SetWindowsHookExW(13, Some(hook_proc), hmod, 0);
-                    if hook == 0 {
-                        eprintln!("[KEYBOARD_HOOK] SetWindowsHookExW FAILED: error={}", GetLastError());
-                    } else {
-                        eprintln!("[KEYBOARD_HOOK] SetWindowsHookExW OK: 0x{:X}", hook);
+                    if hook != 0 {
+                        HOOK.store(hook, Ordering::SeqCst);
                     }
-                    HOOK.store(hook, Ordering::SeqCst);
 
                     let mut msg = std::mem::zeroed();
                     while GetMessageW(&mut msg, 0, 0, 0) > 0 {
@@ -198,5 +189,23 @@ pub fn start(app: tauri::AppHandle) {
     #[cfg(not(windows))]
     {
         let _ = app;
+    }
+}
+
+pub fn stop() {
+    #[cfg(windows)]
+    {
+        let hook = HOOK.swap(0, Ordering::SeqCst);
+        if hook != 0 {
+            unsafe {
+                UnhookWindowsHookEx(hook);
+            }
+        }
+        let thread_id = HOOK_THREAD_ID.swap(0, Ordering::SeqCst);
+        if thread_id != 0 {
+            unsafe {
+                PostThreadMessageW(thread_id, 0x0012, 0, 0);
+            }
+        }
     }
 }
