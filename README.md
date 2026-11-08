@@ -123,15 +123,13 @@
 - **Для сервера:** Linux VPS, Docker & Docker Compose, Node.js 18+.
 
 ### Настройка окружения
-1. Скопируйте шаблон конфигурации бэкенда:
+1. Скопируйте шаблон конфигурации сервера (бэкенд, бот, база данных):
    ```bash
-   cp backend/.env.example backend/.env
-   # Укажите DATABASE_URL, REDIS_URL, JWT_SECRET, BOT_TOKEN и WISP_SALT
+   cp .env.example .env
    ```
-2. Скопируйте шаблон конфигурации фронтенда:
+2. Скопируйте шаблон конфигурации десктопного приложения:
    ```bash
-   cp frontend/.env.example frontend/.env
-   # Укажите VITE_API_DOMAIN и WISP_SALT (значение должно совпадать с бэкендом)
+   cp desktop/.env.example desktop/.env
    ```
 
 ### Запуск в режиме разработки (Dev)
@@ -141,8 +139,8 @@ cd backend
 npm install
 npm start
 
-# Фронтенд (десктопный клиент)
-cd frontend
+# Десктопный клиент
+cd desktop
 npm install
 npm run tauri dev
 ```
@@ -150,10 +148,10 @@ npm run tauri dev
 ### Релизная сборка (Production)
 Сборка изолированного бинарника клиента:
 ```bash
-cd frontend
+cd desktop
 npm run tauri build
 ```
-Готовый `.exe` файл будет сформирован в директории `frontend/src-tauri/target/release/`.
+Готовый `.exe` файл будет сформирован в директории `desktop/src-tauri/target/release/`.
 
 ---
 

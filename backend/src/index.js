@@ -14,6 +14,9 @@ import crypto from "node:crypto";
 import ipRangeCheck from "ip-range-check";
 import { WebSocketServer, WebSocket } from "ws";
 import { LogService } from "./services/LogService.js";
+
+const BOT_API_SECRET = process.env.API_SECRET || process.env.BOT_TOKEN;
+
 // Хранилище активных Wisp сокетов: userId -> Set(socket)
 const activeWispSockets = new Map();
 
@@ -76,6 +79,16 @@ let allowedTgIds = new Map();
 
 const client = await db.connect();
 try {
+	await client.query(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`);
+	await client.query(`
+		CREATE TABLE IF NOT EXISTS users (
+			id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+			username VARCHAR(50) UNIQUE NOT NULL,
+			telegram_id VARCHAR(64),
+			is_active BOOLEAN DEFAULT TRUE,
+			created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+		)
+	`);
 	await client.query(`
 		CREATE TABLE IF NOT EXISTS whitelists (
 			id SERIAL PRIMARY KEY,
@@ -227,7 +240,7 @@ const fastify = Fastify({
 				if (clientIp && typeof clientIp === 'string') clientIp = clientIp.split(',')[0].trim();
 
 				const botToken = req.headers["x-bot-token"];
-				const isBot = botToken && process.env.BOT_TOKEN && botToken.length === process.env.BOT_TOKEN.length && crypto.timingSafeEqual(Buffer.from(botToken), Buffer.from(process.env.BOT_TOKEN));
+				const isBot = botToken && BOT_API_SECRET && botToken.length === BOT_API_SECRET.length && crypto.timingSafeEqual(Buffer.from(botToken), Buffer.from(BOT_API_SECRET));
 
 				if (!isBot && !isIpAllowed(clientIp)) {
 					console.warn(`[FIREWALL HTTP] Blocked request from IP: ${clientIp}`);
@@ -664,7 +677,7 @@ fastify.get("/api/events", async (req, reply) => {
 
 fastify.post("/api/admin/command", async (req, reply) => {
 	const botToken = req.headers["x-bot-token"];
-	if (botToken !== process.env.BOT_TOKEN) {
+	if (botToken !== BOT_API_SECRET) {
 		return reply.code(403).send({ error: "Доступ запрещен" });
 	}
 
@@ -705,7 +718,7 @@ fastify.post("/api/admin/command", async (req, reply) => {
 // ----------------------------------------------------
 fastify.post("/api/auth/register", async (req, reply) => {
 	const botToken = req.headers["x-bot-token"];
-	if (botToken !== process.env.BOT_TOKEN) {
+	if (botToken !== BOT_API_SECRET) {
 		return reply.code(403).send({ error: "Доступ запрещен" });
 	}
 	let { username, user_id } = req.body || {};
@@ -747,7 +760,7 @@ fastify.post("/api/auth/register", async (req, reply) => {
 // ----------------------------------------------------
 fastify.post("/api/auth/otp/generate", async (req, reply) => {
 	const botToken = req.headers["x-bot-token"];
-	if (botToken !== process.env.BOT_TOKEN) {
+	if (botToken !== BOT_API_SECRET) {
 		return reply.code(403).send({ error: "Доступ запрещен" });
 	}
 
@@ -962,10 +975,10 @@ fastify.post("/api/auth/logout", async (req, reply) => {
 // ----------------------------------------------------
 const verifyBotToken = (req, reply, done) => {
 	const botToken = req.headers["x-bot-token"];
-	if (!botToken || botToken.length !== process.env.BOT_TOKEN.length) {
+	if (!botToken || !BOT_API_SECRET || botToken.length !== BOT_API_SECRET.length) {
 		return reply.code(403).send({ error: "Доступ запрещен" });
 	}
-	if (!crypto.timingSafeEqual(Buffer.from(botToken), Buffer.from(process.env.BOT_TOKEN))) {
+	if (!crypto.timingSafeEqual(Buffer.from(botToken), Buffer.from(BOT_API_SECRET))) {
 		return reply.code(403).send({ error: "Доступ запрещен" });
 	}
 	done();
@@ -1319,7 +1332,10 @@ fastify.get("/api/browser/download/:filename", async (req, reply) => {
 	}
 
 	const __dirname = fileURLToPath(new URL(".", import.meta.url));
-	const filePath = join(__dirname, "../releases", filename);
+	let filePath = join(__dirname, "../releases", filename);
+	if (!existsSync(filePath)) {
+		filePath = join(process.cwd(), "releases", filename);
+	}
 
 	if (!existsSync(filePath)) {
 		return reply.code(404).send({ error: "Файл не найден" });

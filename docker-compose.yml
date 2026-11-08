@@ -1,0 +1,66 @@
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: wispr_db
+    restart: always
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-scramjet_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-scramjet_db}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./database.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - wispr_net
+
+  redis:
+    image: redis:7-alpine
+    container_name: wispr_redis
+    restart: always
+    networks:
+      - wispr_net
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: wispr_backend
+    ports:
+      - "127.0.0.1:9000:8080"
+    env_file:
+      - .env
+    volumes:
+      - ./releases:/app/releases
+    depends_on:
+      - db
+      - redis
+    restart: unless-stopped
+    networks:
+      wispr_net:
+        aliases:
+          - scramjet
+          - backend
+
+  bot:
+    build:
+      context: ./telegram_bot
+      dockerfile: Dockerfile
+    container_name: wispr_bot
+    env_file:
+      - .env
+    environment:
+      API_URL: http://backend:8080
+    depends_on:
+      - backend
+    restart: always
+    networks:
+      - wispr_net
+
+volumes:
+  pgdata:
+
+networks:
+  wispr_net:
+

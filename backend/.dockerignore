@@ -1,7 +1,0 @@
-node_modules
-.pnpm-store
-.git
-.env
-Dockerfile
-docker-compose.yml
-*.log

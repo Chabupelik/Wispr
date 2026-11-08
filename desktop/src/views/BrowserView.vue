@@ -370,7 +370,10 @@ const handleGlobalKeydown = (e) => {
   }
   if (e.key === 'Escape' && isFullscreen.value) {
     e.preventDefault();
-    toggleFullscreen();
+    invoke('native_exit_fullscreen_if_active').then(() => {
+      isFullscreen.value = false;
+      isHeaderRevealed.value = true;
+    }).catch(console.error);
     return;
   }
   if (e.ctrlKey || e.metaKey) {

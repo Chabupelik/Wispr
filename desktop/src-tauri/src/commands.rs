@@ -258,13 +258,87 @@ pub fn native_maximize_window(app: tauri::AppHandle) {
     }
 }
 
+#[cfg(windows)]
+extern "system" {
+    fn SetWindowPos(
+        hWnd: isize,
+        hWndInsertAfter: isize,
+        X: i32,
+        Y: i32,
+        cx: i32,
+        cy: i32,
+        uFlags: u32,
+    ) -> i32;
+}
+
+static WAS_MAXIMIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static IS_FULLSCREEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 #[tauri::command]
 pub fn native_toggle_fullscreen(app: tauri::AppHandle) -> Result<bool, String> {
     if let Some(win) = app.get_window("main").or_else(|| app.windows().into_values().next().map(|w| w.clone())) {
         let is_fs = win.is_fullscreen().map_err(|e| e.to_string())?;
         let next_state = !is_fs;
-        win.set_fullscreen(next_state).map_err(|e| e.to_string())?;
+        IS_FULLSCREEN.store(next_state, std::sync::atomic::Ordering::SeqCst);
+
+        if next_state {
+            let is_max = win.is_maximized().unwrap_or(false);
+            WAS_MAXIMIZED.store(is_max, std::sync::atomic::Ordering::SeqCst);
+            if is_max {
+                let _ = win.unmaximize();
+            }
+            win.set_fullscreen(true).map_err(|e| e.to_string())?;
+            #[cfg(windows)]
+            {
+                if let Ok(hwnd) = win.hwnd() {
+                    if let Ok(Some(mon)) = win.current_monitor() {
+                        let pos = mon.position();
+                        let size = mon.size();
+                        unsafe {
+                            SetWindowPos(
+                                hwnd.0 as isize,
+                                0, // HWND_TOP
+                                pos.x,
+                                pos.y,
+                                size.width as i32,
+                                size.height as i32,
+                                0x0004 | 0x0020 | 0x0040, // SWP_NOZORDER | SWP_FRAMECHANGED | SWP_SHOWWINDOW
+                            );
+                        }
+                    }
+                }
+            }
+        } else {
+            win.set_fullscreen(false).map_err(|e| e.to_string())?;
+            if WAS_MAXIMIZED.load(std::sync::atomic::Ordering::SeqCst) {
+                let _ = win.maximize();
+            }
+        }
+
         let _ = win.emit("fullscreen-changed", next_state);
+
+        let tab_mgr = app.state::<TabManager>();
+        if next_state {
+            tab_mgr.set_top_bar_height(0.0);
+        } else {
+            tab_mgr.set_top_bar_height(84.0);
+        }
+        tab_mgr.sync_main_window_geometry(&win);
+
+        let app_clone = app.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if let Some(w) = app_clone.get_window("main") {
+                let tm = app_clone.state::<TabManager>();
+                tm.sync_main_window_geometry(&w);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            if let Some(w) = app_clone.get_window("main") {
+                let tm = app_clone.state::<TabManager>();
+                tm.sync_main_window_geometry(&w);
+            }
+        });
+
         Ok(next_state)
     } else {
         Err("Main window not found".to_string())
@@ -275,9 +349,65 @@ pub fn native_toggle_fullscreen(app: tauri::AppHandle) -> Result<bool, String> {
 pub fn native_set_fullscreen(app: tauri::AppHandle, fullscreen: bool) -> Result<bool, String> {
     if let Some(win) = app.get_window("main").or_else(|| app.windows().into_values().next().map(|w| w.clone())) {
         let is_fs = win.is_fullscreen().map_err(|e| e.to_string())?;
+        IS_FULLSCREEN.store(fullscreen, std::sync::atomic::Ordering::SeqCst);
         if is_fs != fullscreen {
-            win.set_fullscreen(fullscreen).map_err(|e| e.to_string())?;
+            if fullscreen {
+                let is_max = win.is_maximized().unwrap_or(false);
+                WAS_MAXIMIZED.store(is_max, std::sync::atomic::Ordering::SeqCst);
+                if is_max {
+                    let _ = win.unmaximize();
+                }
+                win.set_fullscreen(true).map_err(|e| e.to_string())?;
+                #[cfg(windows)]
+                {
+                    if let Ok(hwnd) = win.hwnd() {
+                        if let Ok(Some(mon)) = win.current_monitor() {
+                            let pos = mon.position();
+                            let size = mon.size();
+                            unsafe {
+                                SetWindowPos(
+                                    hwnd.0 as isize,
+                                    0,
+                                    pos.x,
+                                    pos.y,
+                                    size.width as i32,
+                                    size.height as i32,
+                                    0x0004 | 0x0020 | 0x0040,
+                                );
+                            }
+                        }
+                    }
+                }
+            } else {
+                win.set_fullscreen(false).map_err(|e| e.to_string())?;
+                if WAS_MAXIMIZED.load(std::sync::atomic::Ordering::SeqCst) {
+                    let _ = win.maximize();
+                }
+            }
+
             let _ = win.emit("fullscreen-changed", fullscreen);
+
+            let tab_mgr = app.state::<TabManager>();
+            if fullscreen {
+                tab_mgr.set_top_bar_height(0.0);
+            } else {
+                tab_mgr.set_top_bar_height(84.0);
+            }
+            tab_mgr.sync_main_window_geometry(&win);
+
+            let app_clone = app.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                if let Some(w) = app_clone.get_window("main") {
+                    let tm = app_clone.state::<TabManager>();
+                    tm.sync_main_window_geometry(&w);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                if let Some(w) = app_clone.get_window("main") {
+                    let tm = app_clone.state::<TabManager>();
+                    tm.sync_main_window_geometry(&w);
+                }
+            });
         }
         Ok(fullscreen)
     } else {
@@ -310,8 +440,31 @@ pub fn native_show_fullscreen_header(app: tauri::AppHandle, show: bool) -> Resul
 pub fn native_exit_fullscreen_if_active(app: tauri::AppHandle) -> Result<bool, String> {
     if let Some(win) = app.get_window("main").or_else(|| app.windows().into_values().next().map(|w| w.clone())) {
         if let Ok(true) = win.is_fullscreen() {
+            IS_FULLSCREEN.store(false, std::sync::atomic::Ordering::SeqCst);
             win.set_fullscreen(false).map_err(|e| e.to_string())?;
+            if WAS_MAXIMIZED.load(std::sync::atomic::Ordering::SeqCst) {
+                let _ = win.maximize();
+            }
             let _ = win.emit("fullscreen-changed", false);
+
+            let tab_mgr = app.state::<TabManager>();
+            tab_mgr.set_top_bar_height(84.0);
+            tab_mgr.sync_main_window_geometry(&win);
+
+            let app_clone = app.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                if let Some(w) = app_clone.get_window("main") {
+                    let tm = app_clone.state::<TabManager>();
+                    tm.sync_main_window_geometry(&w);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                if let Some(w) = app_clone.get_window("main") {
+                    let tm = app_clone.state::<TabManager>();
+                    tm.sync_main_window_geometry(&w);
+                }
+            });
+
             return Ok(true);
         }
         Ok(false)

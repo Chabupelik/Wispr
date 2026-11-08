@@ -22,11 +22,45 @@ impl TabManager {
         }
     }
 
+    pub fn set_top_bar_height(&self, height: f64) {
+        let mut h = self.top_bar_height.lock();
+        *h = height;
+    }
+
+    pub fn get_target_geometry(&self, window: &tauri::Window) -> (f64, f64, f64) {
+        let is_fs = window.is_fullscreen().unwrap_or(false);
+        let scale_factor = window.scale_factor().unwrap_or(1.0);
+
+        let (win_w, win_h) = if is_fs {
+            // В полноэкранном режиме используем габариты монитора, чтобы устранить зазор от панели задач
+            if let Ok(Some(monitor)) = window.current_monitor() {
+                let mon_logical = monitor.size().to_logical::<f64>(scale_factor);
+                (mon_logical.width, mon_logical.height)
+            } else if let Ok(window_size) = window.inner_size() {
+                let logical = window_size.to_logical::<f64>(scale_factor);
+                (logical.width, logical.height)
+            } else {
+                (800.0, 600.0)
+            }
+        } else if let Ok(window_size) = window.inner_size() {
+            let logical = window_size.to_logical::<f64>(scale_factor);
+            (logical.width, logical.height)
+        } else {
+            (800.0, 600.0)
+        };
+
+        let top_bar_height = if is_fs && *self.top_bar_height.lock() == 0.0 {
+            0.0
+        } else {
+            *self.top_bar_height.lock()
+        };
+
+        let content_height = (win_h - top_bar_height).max(100.0);
+        (win_w, top_bar_height, content_height)
+    }
+
     pub fn update_top_bar_height(&self, window: &tauri::Window, height: f64) {
-        {
-            let mut h = self.top_bar_height.lock();
-            *h = height;
-        }
+        self.set_top_bar_height(height);
         self.sync_main_window_geometry(window);
     }
 
@@ -215,26 +249,30 @@ impl TabManager {
                     notifyUrl(window.location.href);
                 };
 
+                // Вспомогательная функция для гарантированной отправки действий в Rust из удаленного WebView
+                const _callTauriAction = (action) => {
+                    try {
+                        window.open('tauri-action://' + action, '_blank');
+                    } catch (_) {
+                        try {
+                            const a = document.createElement('a');
+                            a.href = 'tauri-action://' + action;
+                            a.target = '_blank';
+                            a.click();
+                        } catch (_) {}
+                    }
+                };
+
                 // Полноэкранный режим (F11 / Esc) в дочерних Webview
                 window.addEventListener('keydown', (e) => {
                     if (e.key === 'F11') {
                         e.preventDefault();
                         e.stopPropagation();
-                        try {
-                            if (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) {
-                                window.__TAURI__.core.invoke('native_toggle_fullscreen').catch(() => {});
-                            } else if (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke) {
-                                window.__TAURI_INTERNALS__.invoke('native_toggle_fullscreen').catch(() => {});
-                            }
-                        } catch (_) {}
+                        _callTauriAction('toggle-fullscreen');
                     } else if (e.key === 'Escape') {
-                        try {
-                            if (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) {
-                                window.__TAURI__.core.invoke('native_exit_fullscreen_if_active').catch(() => {});
-                            } else if (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke) {
-                                window.__TAURI_INTERNALS__.invoke('native_exit_fullscreen_if_active').catch(() => {});
-                            }
-                        } catch (_) {}
+                        if (!document.fullscreenElement) {
+                            _callTauriAction('exit-fullscreen');
+                        }
                     }
                 }, true);
 
@@ -245,13 +283,7 @@ impl TabManager {
                         const now = Date.now();
                         if (now - _lastTopEdgeCheck > 200) {
                             _lastTopEdgeCheck = now;
-                            try {
-                                if (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) {
-                                    window.__TAURI__.core.invoke('native_show_fullscreen_header', { show: true }).catch(() => {});
-                                } else if (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke) {
-                                    window.__TAURI_INTERNALS__.invoke('native_show_fullscreen_header', { show: true }).catch(() => {});
-                                }
-                            } catch (_) {}
+                            _callTauriAction('show-fullscreen-header');
                         }
                     }
                 }, { passive: true });
@@ -259,24 +291,42 @@ impl TabManager {
                 // Поддержка HTML5 Fullscreen (YouTube, игры и т.д.)
                 document.addEventListener('fullscreenchange', () => {
                     const isElemFs = !!document.fullscreenElement;
-                    try {
-                        if (window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke) {
-                            window.__TAURI__.core.invoke('native_set_fullscreen', { fullscreen: isElemFs }).catch(() => {});
-                        } else if (window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke) {
-                            window.__TAURI_INTERNALS__.invoke('native_set_fullscreen', { fullscreen: isElemFs }).catch(() => {});
-                        }
-                    } catch (_) {}
+                    _callTauriAction(isElemFs ? 'enter-fullscreen' : 'exit-fullscreen');
                 });
         "#;
         let init_script = base_script.replace("{{TAB_ID}}", &t_id_ipc);
 
         let t_id_load = t_id.clone();
         let app_handle_new_win = app_handle.clone();
+        let app_handle_nav = app_handle.clone();
         let builder = WebviewBuilder::new(&label, parsed_url)
             .incognito(true)
             .initialization_script(&init_script)
             .on_new_window(move |url, _features| {
                 println!("[NEW_WINDOW] Requested URL: {}", url);
+                if url.scheme() == "tauri-action" {
+                    let mut action = url.host_str().unwrap_or("");
+                    if action.is_empty() {
+                        action = url.path().trim_matches('/');
+                    }
+                    match action {
+                        "toggle-fullscreen" => {
+                            let _ = crate::commands::native_toggle_fullscreen(app_handle_new_win.clone());
+                        }
+                        "exit-fullscreen" => {
+                            let _ = crate::commands::native_exit_fullscreen_if_active(app_handle_new_win.clone());
+                        }
+                        "enter-fullscreen" => {
+                            let _ = crate::commands::native_set_fullscreen(app_handle_new_win.clone(), true);
+                        }
+                        "show-fullscreen-header" => {
+                            let _ = crate::commands::native_show_fullscreen_header(app_handle_new_win.clone(), true);
+                        }
+                        _ => {}
+                    }
+                    return tauri::webview::NewWindowResponse::Deny;
+                }
+
                 let url_str = url.to_string();
                 if !url_str.is_empty() && url_str != "about:blank" {
                     #[derive(serde::Serialize, Clone)]
@@ -289,7 +339,28 @@ impl TabManager {
                 tauri::webview::NewWindowResponse::Deny
             })
             .on_navigation(move |url| {
-                let _ = url;
+                if url.scheme() == "tauri-action" {
+                    let mut action = url.host_str().unwrap_or("");
+                    if action.is_empty() {
+                        action = url.path().trim_matches('/');
+                    }
+                    match action {
+                        "toggle-fullscreen" => {
+                            let _ = crate::commands::native_toggle_fullscreen(app_handle_nav.clone());
+                        }
+                        "exit-fullscreen" => {
+                            let _ = crate::commands::native_exit_fullscreen_if_active(app_handle_nav.clone());
+                        }
+                        "enter-fullscreen" => {
+                            let _ = crate::commands::native_set_fullscreen(app_handle_nav.clone(), true);
+                        }
+                        "show-fullscreen-header" => {
+                            let _ = crate::commands::native_show_fullscreen_header(app_handle_nav.clone(), true);
+                        }
+                        _ => {}
+                    }
+                    return false;
+                }
                 true
             })
             .on_page_load(move |webview, _payload| {
@@ -425,15 +496,7 @@ impl TabManager {
         println!("[TAB_MANAGER] switch_to_tab: {}", tab_id);
         let app_handle = window.app_handle();
 
-        let window_size = window
-            .inner_size()
-            .unwrap_or(tauri::PhysicalSize::new(800, 600));
-        let scale_factor = window
-            .scale_factor()
-            .unwrap_or(1.0);
-        let logical_size = window_size.to_logical::<f64>(scale_factor);
-        let top_bar_height = *self.top_bar_height.lock();
-        let content_height = (logical_size.height - top_bar_height).max(100.0);
+        let (win_w, top_bar_height, content_height) = self.get_target_geometry(window);
 
         let tabs_map = self.tabs.lock();
         let mut found_active = false;
@@ -443,7 +506,7 @@ impl TabManager {
                 if let Some(wv) = app_handle.get_webview(label) {
                     println!("[TAB_MANAGER] Showing webview: {}", label);
                     let _ = wv.set_position(tauri::LogicalPosition::new(0.0, top_bar_height));
-                    let _ = wv.set_size(tauri::LogicalSize::new(logical_size.width, content_height));
+                    let _ = wv.set_size(tauri::LogicalSize::new(win_w, content_height));
                     let _ = wv.show();
                     let _ = wv.set_focus();
                     found_active = true;
@@ -557,15 +620,9 @@ impl TabManager {
             
             if let Some(lbl) = label {
                 if let Some(wv) = window.app_handle().get_webview(&lbl) {
-                    if let Ok(window_size) = window.inner_size() {
-                        let scale_factor = window.scale_factor().unwrap_or(1.0);
-                        let logical_size = window_size.to_logical::<f64>(scale_factor);
-                        let top_bar_height = *self.top_bar_height.lock();
-                        let content_height = (logical_size.height - top_bar_height).max(100.0);
-                        
-                        let _ = wv.set_position(tauri::LogicalPosition::new(0.0, top_bar_height));
-                        let _ = wv.set_size(tauri::LogicalSize::new(logical_size.width, content_height));
-                    }
+                    let (win_w, top_bar_height, content_height) = self.get_target_geometry(window);
+                    let _ = wv.set_position(tauri::LogicalPosition::new(0.0, top_bar_height));
+                    let _ = wv.set_size(tauri::LogicalSize::new(win_w, content_height));
                 }
             }
         }

@@ -1,5 +1,6 @@
 pub mod browser;
 pub mod commands;
+pub mod keyboard_hook;
 pub mod security;
 pub mod tunnel;
 
@@ -91,6 +92,8 @@ pub fn run() {
                 log::info!("[CONFIG] WISP_SALT задан = {}", if option_env!("WISP_SALT").is_some() { "да" } else { "НЕТ — ошибка!" });
                 log::info!("=== WISP DIAGNOSTIC END ===");
             }
+
+            keyboard_hook::start(app.handle().clone());
 
             Ok(())
         })

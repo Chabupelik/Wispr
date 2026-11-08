@@ -1,12 +1,13 @@
 {
-  "name": "browser-root",
+  "name": "wispr",
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "npm --prefix frontend run dev",
-    "build": "npm --prefix frontend run build",
-    "tauri": "npm --prefix frontend exec -- tauri",
-    "tauri:dev": "npm --prefix frontend exec -- tauri dev",
-    "tauri:build": "npm --prefix frontend exec -- tauri build"
+    "dev": "npm --prefix desktop run dev",
+    "build": "npm --prefix desktop run build",
+    "tauri": "npm --prefix desktop exec -- tauri",
+    "tauri:dev": "npm --prefix desktop exec -- tauri dev",
+    "tauri:build": "npm --prefix desktop exec -- tauri build",
+    "backend:start": "npm --prefix backend start"
   }
 }

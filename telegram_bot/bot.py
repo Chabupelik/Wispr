@@ -16,8 +16,8 @@ from aiogram.exceptions import TelegramBadRequest
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-API_BASE = os.getenv("API_URL", "http://localhost:8080").replace("/api/auth/register", "").rstrip("/")
-API_SECRET = os.getenv("API_SECRET")
+API_BASE = os.getenv("API_URL", "http://backend:8080").replace("/api/auth/register", "").rstrip("/")
+API_SECRET = os.getenv("API_SECRET") or os.getenv("BOT_TOKEN")
 ADMIN_ID = str(os.getenv("ADMIN_ID"))
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="Markdown"))
