@@ -290,3 +290,4 @@ pub fn get_downloads_dir() -> String {
     }
     ".".to_string()
 }
+

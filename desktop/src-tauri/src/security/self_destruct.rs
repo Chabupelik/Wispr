@@ -82,3 +82,4 @@ fn powershell_encoded(script: &str) -> String {
     }
     out
 }
+
