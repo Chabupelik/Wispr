@@ -1,4 +1,5 @@
 fn main() {
+  println!("cargo:rerun-if-changed=../.env");
   let _ = dotenvy::from_filename("../.env");
   
   if let Ok(salt) = std::env::var("WISP_SALT") {
