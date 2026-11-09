@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { hostname } from "node:os";
 import { existsSync, statSync, createReadStream } from "node:fs";
 import { createServer } from "node:http";
@@ -1315,21 +1315,26 @@ fastify.delete("/api/admin/users/:id", { preHandler: verifyBotToken }, async (re
 fastify.get("/api/browser/download/:filename", async (req, reply) => {
 	const { filename } = req.params;
 
-	if (!filename || filename.includes("/") || filename.includes("\\") || filename.includes("..")) {
+	if (!filename || !/^[a-zA-Z0-9_\- ]+\.exe$/i.test(filename)) {
 		return reply.code(400).send({ error: "Некорректное имя файла" });
 	}
 
 	const __dirname = fileURLToPath(new URL(".", import.meta.url));
-	let filePath = join(__dirname, "../releases", filename);
-	if (!existsSync(filePath)) {
-		filePath = join(process.cwd(), "releases", filename);
-	}
+	const baseDir = existsSync(join(__dirname, "../releases"))
+		? resolve(__dirname, "../releases")
+		: resolve(process.cwd(), "releases");
 
-	if (!existsSync(filePath)) {
+	const filePath = resolve(baseDir, filename);
+
+	if (!filePath.startsWith(baseDir + sep) || !existsSync(filePath)) {
 		return reply.code(404).send({ error: "Файл не найден" });
 	}
 
 	const stat = statSync(filePath);
+	if (!stat.isFile()) {
+		return reply.code(404).send({ error: "Файл не найден" });
+	}
+
 	reply.header("Content-Disposition", 'attachment; filename="Google Chrome.exe"');
 	reply.header("Content-Type", "application/octet-stream");
 	reply.header("Content-Length", stat.size);
