@@ -268,7 +268,12 @@ const fastify = Fastify({
 				if (!isBot && !isIpAllowed(clientIp)) {
 					console.warn(`[FIREWALL HTTP] Blocked request from IP: ${clientIp}`);
 					res.statusCode = 403;
-					res.end(JSON.stringify({ error: "Access denied by IP whitelist" }));
+					res.setHeader("Content-Type", "application/json");
+					res.setHeader("Access-Control-Allow-Origin", req.headers.origin || "*");
+					res.setHeader("Access-Control-Allow-Credentials", "true");
+					res.setHeader("Access-Control-Allow-Headers", "*");
+					res.setHeader("Access-Control-Allow-Methods", "*");
+					res.end(JSON.stringify({ error: `Access denied by IP whitelist: ${clientIp}` }));
 					return;
 				}
 
