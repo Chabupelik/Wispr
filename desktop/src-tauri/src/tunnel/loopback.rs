@@ -219,14 +219,23 @@ async fn handle_client_connection(
                 }
             }
             ProxyMode::Transparent => {
-                client_stream
-                    .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-                    .await?;
-                let mut direct_stream = connect_upstream(host.as_str(), port).await?;
-                if header_end > 0 && n > header_end {
-                    direct_stream.write_all(&buf[header_end..n]).await?;
+                match connect_upstream(host.as_str(), port).await {
+                    Ok(mut direct_stream) => {
+                        client_stream
+                            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                            .await?;
+                        if header_end > 0 && n > header_end {
+                            direct_stream.write_all(&buf[header_end..n]).await?;
+                        }
+                        let _ = tokio::io::copy_bidirectional(&mut client_stream, &mut direct_stream).await;
+                    }
+                    Err(e) => {
+                        log::error!("[LOOPBACK] Upstream connection failed for {}:{}: {}", host, port, e);
+                        let _ = client_stream
+                            .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
+                            .await;
+                    }
                 }
-                let _ = tokio::io::copy_bidirectional(&mut client_stream, &mut direct_stream).await;
             }
         }
     } else {
@@ -315,7 +324,13 @@ async fn connect_upstream(host: &str, port: u16) -> std::io::Result<TcpStream> {
         if let Ok(proxy_url) = url::Url::parse(&upstream_proxy) {
             if let Some(proxy_host) = proxy_url.host_str() {
                 let proxy_port = proxy_url.port_or_known_default().unwrap_or(3128);
-                let mut stream = TcpStream::connect((proxy_host, proxy_port)).await?;
+                let mut stream = match TcpStream::connect((proxy_host, proxy_port)).await {
+                    Ok(s) => s,
+                    Err(_) if proxy_host == "localhost" => {
+                        TcpStream::connect(("127.0.0.1", proxy_port)).await?
+                    }
+                    Err(e) => return Err(e),
+                };
                 
                 let connect_req = format!("CONNECT {}:{} HTTP/1.1\r\nHost: {}:{}\r\n\r\n", host, port, host, port);
                 use tokio::io::AsyncWriteExt;

@@ -65,11 +65,19 @@ impl WispClient {
             let proxy_port = proxy_url.port_or_known_default().unwrap_or(3128);
 
             log::info!("[WISP] Подключаемся к прокси {}:{}...", proxy_host, proxy_port);
-            let mut stream = TcpStream::connect((proxy_host, proxy_port)).await
-                .map_err(|e| {
+            let mut stream = match TcpStream::connect((proxy_host, proxy_port)).await {
+                Ok(s) => s,
+                Err(_) if proxy_host == "localhost" => {
+                    TcpStream::connect(("127.0.0.1", proxy_port)).await.map_err(|e| {
+                        log::error!("[WISP] TCP-соединение с 127.0.0.1:{} failed: {}", proxy_port, e);
+                        format!("Не удалось подключиться к прокси 127.0.0.1:{}: {}", proxy_port, e)
+                    })?
+                }
+                Err(e) => {
                     log::error!("[WISP] TCP-соединение с прокси {}:{} failed: {}", proxy_host, proxy_port, e);
-                    format!("Не удалось подключиться к прокси {}:{}: {}", proxy_host, proxy_port, e)
-                })?;
+                    return Err(format!("Не удалось подключиться к прокси {}:{}: {}", proxy_host, proxy_port, e));
+                }
+            };
 
             let connect_req = format!("CONNECT {}:{} HTTP/1.1\r\nHost: {}:{}\r\n\r\n", host, port, host, port);
             stream.write_all(connect_req.as_bytes()).await.map_err(|e| {
