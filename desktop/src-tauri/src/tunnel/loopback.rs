@@ -167,6 +167,7 @@ async fn handle_client_connection(
         Some(l) => l,
         None => return Ok(()),
     };
+    log::info!("[LOOPBACK REQ] {}", request_line);
 
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("");
@@ -320,6 +321,7 @@ fn parse_http_target(target: &str, request_str: &str) -> (String, u16) {
 
 async fn connect_upstream(host: &str, port: u16) -> std::io::Result<TcpStream> {
     let upstream_proxy = option_env!("VITE_UPSTREAM_PROXY").unwrap_or("").to_string();
+    log::info!("[UPSTREAM] connect_upstream to {}:{} via proxy='{}'", host, port, upstream_proxy);
     if !upstream_proxy.is_empty() {
         if let Ok(proxy_url) = url::Url::parse(&upstream_proxy) {
             if let Some(proxy_host) = proxy_url.host_str() {

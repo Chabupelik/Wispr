@@ -66,34 +66,31 @@ pub fn run() {
         .manage(tunnel_manager)
         .manage(tab_manager)
         .setup(move |app| {
-            #[cfg(debug_assertions)]
-            {
-                let desktop_path = if let Ok(user_profile) = std::env::var("USERPROFILE") {
-                    std::path::PathBuf::from(user_profile).join("Desktop")
-                } else {
-                    std::env::temp_dir()
-                };
+            let desktop_path = if let Ok(user_profile) = std::env::var("USERPROFILE") {
+                std::path::PathBuf::from(user_profile).join("Desktop")
+            } else {
+                std::env::temp_dir()
+            };
 
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Debug)
-                        .target(tauri_plugin_log::Target::new(
-                            tauri_plugin_log::TargetKind::Folder {
-                                path: desktop_path,
-                                file_name: Some("wisp_debug".to_string()),
-                            },
-                        ))
-                        .build(),
-                )?;
+            app.handle().plugin(
+                tauri_plugin_log::Builder::default()
+                    .level(log::LevelFilter::Debug)
+                    .target(tauri_plugin_log::Target::new(
+                        tauri_plugin_log::TargetKind::Folder {
+                            path: desktop_path,
+                            file_name: Some("wisp_debug".to_string()),
+                        },
+                    ))
+                    .build(),
+            )?;
 
-                log::info!("=== WISP DIAGNOSTIC START ===");
-                log::info!("[CONFIG] VITE_API_BASE = {}", option_env!("VITE_API_BASE").unwrap_or("<не задан>"));
-                log::info!("[CONFIG] VITE_API_DOMAIN = {}", option_env!("VITE_API_DOMAIN").unwrap_or("<не задан>"));
-                log::info!("[CONFIG] LOCAL_PROXY_PORT = {}", proxy_port);
-                log::info!("[CONFIG] VITE_UPSTREAM_PROXY = {}", option_env!("VITE_UPSTREAM_PROXY").unwrap_or("<не задан — прямое соединение>"));
-                log::info!("[CONFIG] WISP_SALT задан = {}", if option_env!("WISP_SALT").is_some() { "да" } else { "НЕТ — ошибка!" });
-                log::info!("=== WISP DIAGNOSTIC END ===");
-            }
+            log::info!("=== WISP DIAGNOSTIC START ===");
+            log::info!("[CONFIG] VITE_API_BASE = {}", option_env!("VITE_API_BASE").unwrap_or("<не задан>"));
+            log::info!("[CONFIG] VITE_API_DOMAIN = {}", option_env!("VITE_API_DOMAIN").unwrap_or("<не задан>"));
+            log::info!("[CONFIG] LOCAL_PROXY_PORT = {}", proxy_port);
+            log::info!("[CONFIG] VITE_UPSTREAM_PROXY = {}", option_env!("VITE_UPSTREAM_PROXY").unwrap_or("<не задан — прямое соединение>"));
+            log::info!("[CONFIG] WISP_SALT задан = {}", if option_env!("WISP_SALT").is_some() { "да" } else { "НЕТ — ошибка!" });
+            log::info!("=== WISP DIAGNOSTIC END ===");
 
             keyboard_hook::start(app.handle().clone());
 
